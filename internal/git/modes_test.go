@@ -42,6 +42,30 @@ func TestSymlinkPathsAtRevReadsTreeModes(t *testing.T) {
 	}
 }
 
+// chunkPathspecs counts the pathspecs an ls-tree call carried.
+func chunkPathspecs(t *testing.T, args []string) int {
+	t.Helper()
+	sep := slices.Index(args, "--")
+	if sep < 0 {
+		t.Fatalf("no pathspec separator in %v", args)
+	}
+	return len(args) - sep - 1
+}
+
+// A tree lookup that is not rooted at the repo top level resolves its pathspecs
+// against the runner's working directory, so every path in a review run with a
+// --repo-root below the root would match nothing and the whole change would come
+// back unmarked.
+func TestSymlinkPathsAtRevQueriesTheFullTree(t *testing.T) {
+	runner := &stubGitRunner{}
+	if _, err := SymlinkPathsAtRev(context.Background(), runner, "head111", []string{"internal/git/modes.go"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(runner.calls[0], "--full-tree") {
+		t.Fatalf("ls-tree not rooted at the repo top level: %v", runner.calls[0])
+	}
+}
+
 // The paths come from SCM payloads, where a filename may itself look like
 // pathspec magic. "--" stops option parsing but not magic, so each path has to be
 // passed literally: ":(literal)link" must not be reparsed, and ":!foo" must not
@@ -91,11 +115,11 @@ func TestSymlinkPathsAtRevChunksAndSurvivesFailures(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("ls-tree calls = %d, want one per chunk", len(runner.calls))
 	}
-	// "ls-tree -z <rev> --" plus the chunk's pathspecs.
-	if got := len(runner.calls[0]) - 4; got != maxTreeQueryPaths {
+	// Everything after the "--" separator is this chunk's pathspecs.
+	if got := chunkPathspecs(t, runner.calls[0]); got != maxTreeQueryPaths {
 		t.Fatalf("first chunk carried %d paths, want %d", got, maxTreeQueryPaths)
 	}
-	if got := len(runner.calls[1]) - 4; got != 1 {
+	if got := chunkPathspecs(t, runner.calls[1]); got != 1 {
 		t.Fatalf("second chunk carried %d paths, want 1", got)
 	}
 	if marks["link"] == "" {
@@ -318,4 +342,33 @@ func TestReadBlobKeepsBytesVerbatim(t *testing.T) {
 	if _, err := ReadBlob(context.Background(), runner, "", 4096); err == nil {
 		t.Fatal("blob read without an object name")
 	}
+	// The cap belongs in the read: RunLimited keeps git's stderr out of a value
+	// the caller treats as byte-exact, and stops instead of buffering a blob it
+	// would reject anyway.
+	if got := runner.recordedLimits(); len(got) != 2 || got[0] != 4096 || got[1] != 4 {
+		t.Fatalf("blob read caps = %v, want the limit passed to RunLimited", got)
+	}
+}
+
+// A runner that only implements Run (a wrapper, a fake) must still get a target
+// and still honor the cap.
+func TestReadBlobFallsBackToPlainRunner(t *testing.T) {
+	runner := plainRunner{out: "../target\n"}
+
+	target, err := ReadBlob(context.Background(), runner, "32f64f4", 4096)
+	if err != nil || target != "../target\n" {
+		t.Fatalf("target = %q, %v", target, err)
+	}
+	if _, err := ReadBlob(context.Background(), runner, "32f64f4", 4); err == nil {
+		t.Fatal("oversized blob was accepted")
+	}
+}
+
+// plainRunner implements Runner and nothing else.
+type plainRunner struct {
+	out string
+}
+
+func (r plainRunner) Run(context.Context, ...string) (string, error) {
+	return r.out, nil
 }

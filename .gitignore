@@ -1,6 +1,7 @@
 .codex
 .claude
 .zed/
+.nickpit.yaml
 .nickpit.yaml.example
 bin/
 dist/

@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,11 @@ type symlinkTreeRunner struct {
 func (r *symlinkTreeRunner) Run(_ context.Context, args ...string) (string, error) {
 	switch {
 	case len(args) >= 3 && args[0] == "ls-tree":
-		r.revs = append(r.revs, args[2])
+		// The revision is the argument right before the pathspec separator, so
+		// this stays correct as the command gains flags.
+		if sep := slices.Index(args, "--"); sep > 0 {
+			r.revs = append(r.revs, args[sep-1])
+		}
 		var out strings.Builder
 		for _, path := range r.symlinks {
 			out.WriteString("120000 blob 32f64f4\t" + path + "\x00")

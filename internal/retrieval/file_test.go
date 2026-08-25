@@ -887,51 +887,63 @@ func TestLocalEngineGetFileSliceReachesLinesBeyondByteCap(t *testing.T) {
 	}
 }
 
-func TestLocalEngineRejectsSymlinkEscapes(t *testing.T) {
+// A symlink is read AS a symlink: its content is the target path. Following it
+// would attribute the target file's text to the link's own path — wrong content
+// under a reviewed path, wrong line numbers for every finding about it — and for
+// a link that leaves the checkout it would read a file outside the repository.
+func TestLocalEngineReadsSymlinksWithoutFollowing(t *testing.T) {
 	repoRoot := t.TempDir()
 	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("hidden-secret"), 0o644); err != nil {
+	outsideFile := filepath.Join(outside, "secret.txt")
+	insideFile := filepath.Join(repoRoot, "inside.txt")
+	if err := os.WriteFile(outsideFile, []byte("hidden-secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repoRoot, "inside.txt"), []byte("inside content"), 0o644); err != nil {
+	if err := os.WriteFile(insideFile, []byte("inside content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(repoRoot, "evil.txt")); err != nil {
+	if err := os.Symlink(outsideFile, filepath.Join(repoRoot, "evil.txt")); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(repoRoot, "inside.txt"), filepath.Join(repoRoot, "ok.txt")); err != nil {
+	if err := os.Symlink(insideFile, filepath.Join(repoRoot, "ok.txt")); err != nil {
 		t.Fatal(err)
 	}
 	engine := NewLocalEngine()
 
-	if _, err := engine.GetFile(context.Background(), repoRoot, "evil.txt"); err == nil {
-		t.Fatal("GetFile followed a symlink outside the repo")
+	escaping, err := engine.GetFile(context.Background(), repoRoot, "evil.txt")
+	if err != nil || escaping.Content != outsideFile {
+		t.Fatalf("escaping symlink read = %#v, %v, want its target path", escaping, err)
 	}
-	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "evil.txt", 1, 1); err == nil {
-		t.Fatal("GetFileSlice followed a symlink outside the repo")
+	slice, err := engine.GetFileSlice(context.Background(), repoRoot, "evil.txt", 1, 1)
+	if err != nil || slice.Content != outsideFile {
+		t.Fatalf("escaping symlink slice = %#v, %v, want its target path", slice, err)
+	}
+	// Line 1 is the whole link, so a range starting past it selects nothing.
+	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "evil.txt", 2, 3); err == nil {
+		t.Fatal("a range past the link target returned a slice")
 	}
 	got, err := engine.GetFile(context.Background(), repoRoot, "ok.txt")
-	if err != nil || got.Content != "inside content" {
-		t.Fatalf("in-repo symlink read = %#v, %v", got, err)
+	if err != nil || got.Content != insideFile {
+		t.Fatalf("in-repo symlink read = %#v, %v, want its target path", got, err)
 	}
 	if _, err := engine.GetFile(context.Background(), repoRoot, "inside.txt"); err != nil {
 		t.Fatalf("plain file read failed: %v", err)
 	}
 
-	// The search walk must skip the escaping symlink instead of surfacing its target.
+	// The search walk sees link targets, never the linked file's content.
 	results, err := engine.Search(context.Background(), repoRoot, "", "hidden-secret", 0, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if results.ResultCount != 0 {
-		t.Fatalf("search leaked symlink target: %#v", results.Results)
+		t.Fatalf("search leaked the content behind a symlink: %#v", results.Results)
 	}
-	// Searching the symlinked file directly skips it like any unreadable file.
+	// Searching the symlinked file directly reads the link, not the target file.
 	direct, err := engine.Search(context.Background(), repoRoot, "evil.txt", "hidden-secret", 0, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if direct.ResultCount != 0 {
-		t.Fatalf("direct search leaked symlink target: %#v", direct.Results)
+		t.Fatalf("direct search leaked the content behind a symlink: %#v", direct.Results)
 	}
 }

@@ -277,6 +277,33 @@ func TestAllowedDiffCodeLocationsKeepsPathsLiteral(t *testing.T) {
 	}
 }
 
+// An allowed location's path comes from an SCM payload or a synthesized
+// "diff --git" line, so it can carry the same noise a model adds. Comparing a
+// cleaned finding path against a raw candidate would match nothing and drop every
+// finding about that file as out-of-scope — a silent whole-file blackout.
+func TestCodeLocationOverlapsAllowedCleansTheCandidateSide(t *testing.T) {
+	allowed := []model.CodeLocation{
+		{FilePath: "./dir//x.go", LineRange: model.LineRange{Start: 4, End: 5, Count: 2}},
+	}
+	loc := model.CodeLocation{FilePath: "dir/x.go", LineRange: model.LineRange{Start: 4, End: 4, Count: 1}}
+
+	if !codeLocationOverlapsAllowed(loc, allowed) {
+		t.Fatal("a finding was dropped because the allowed path carried payload noise")
+	}
+	if got := allowedPathFor(allowed, "dir/x.go"); got != "./dir//x.go" {
+		t.Fatalf("allowedPathFor = %q, want git's own spelling of the path", got)
+	}
+	// Separators are still not folded on the candidate side: `a\b` and `a/b` are
+	// two different files on Unix, and one must not authorize the other.
+	separators := []model.CodeLocation{
+		{FilePath: `a`, LineRange: model.LineRange{Start: 1, End: 1, Count: 1}},
+	}
+	other := model.CodeLocation{FilePath: "a/b", LineRange: model.LineRange{Start: 1, End: 1, Count: 1}}
+	if codeLocationOverlapsAllowed(other, separators) {
+		t.Fatal("a finding on a/b was authorized by the location of a\\b")
+	}
+}
+
 // Scope without evidence would invite a finding the prompt cannot ground: with no
 // hunk, the target and the old path are the entire change.
 func TestMetadataOnlySymlinkLocationsRequireEvidence(t *testing.T) {

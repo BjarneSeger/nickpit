@@ -216,6 +216,36 @@ func TestFetchPRCarriesHeadSHA(t *testing.T) {
 	}
 }
 
+// GitHub reports previous_filename for a COPY as well, where nothing moved. Taking
+// it there would show an unmoved file as renamed and hand a patch-less entry the
+// review scope that a move earns.
+func TestFetchPRIgnoresCopiedPreviousFilename(t *testing.T) {
+	files := `[{"filename":"dir/copy.go","status":"copied","previous_filename":"dir/origin.go","additions":0,"deletions":0}]`
+	fixtures := map[string][]byte{
+		"/repos/owner/repo/pulls/123":         testutil.LoadFixture(t, filepath.Join("..", "..", "..", "testdata", "fixtures", "github", "pr_metadata.json")),
+		"/repos/owner/repo/pulls/123/commits": testutil.LoadFixture(t, filepath.Join("..", "..", "..", "testdata", "fixtures", "github", "pr_commits.json")),
+		"/repos/owner/repo/pulls/123/files":   []byte(files),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ok := fixtures[r.URL.EscapedPath()]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	ctx, err := client.FetchPR(context.Background(), "owner/repo", 123, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctx.ChangedFiles) != 1 || ctx.ChangedFiles[0].OldPath != "" {
+		t.Fatalf("changed files = %#v, want no old path for a copy", ctx.ChangedFiles)
+	}
+}
+
 // A pure rename has no patch at all, so previous_filename is the only record of the
 // move — and for a relative symlink the move alone decides whether the target still
 // resolves.

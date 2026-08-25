@@ -124,33 +124,12 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 			}
 		}
 	}
-	targets := make(map[string]string, len(blobs))
-	for i := range reviewCtx.ChangedFiles {
-		file := &reviewCtx.ChangedFiles[i]
-		if !file.Symlink || file.SymlinkTarget != "" || hasHunk[file.Path] {
-			continue
-		}
-		target, cached := targets[file.Path]
-		if !cached {
-			blob, ok := blobs[file.Path]
-			if !ok {
-				continue
-			}
-			read, err := git.ReadBlob(ctx, runner, blob, maxSymlinkTargetBytes)
-			if err != nil {
-				continue
-			}
-			target = read
-			targets[file.Path] = target
-		}
-		file.SymlinkTarget = target
-	}
+	// Same reading and same skip rules as a local diff; only the blob names come
+	// from the tree lookup above instead of a raw listing.
+	git.AttachSymlinkTargets(ctx, runner, reviewCtx.ChangedFiles, reviewCtx.DiffHunks, func(path string) string {
+		return blobs[path]
+	})
 }
-
-// maxSymlinkTargetBytes bounds what is accepted as a link target. POSIX caps a
-// symlink at PATH_MAX; anything larger is not a target, so it is not read into the
-// review context.
-const maxSymlinkTargetBytes = 4096
 
 // sourceOmitsFileModes reports whether a review source's diff carries no git file
 // mode at all, so a symlink cannot be recognized from the diff alone and the

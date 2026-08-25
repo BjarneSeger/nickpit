@@ -496,9 +496,10 @@ func (h *ExecHistory) commitDiff(ctx context.Context, runner Runner, sha string,
 	}
 	if len(diff.Files) == 0 {
 		// A merge rendered with --cc emits no raw entries, so the patch is the
-		// only source left. It cannot express a rename's old path or mark a
-		// binary file, which is exactly why the raw/numstat entries above are
-		// preferred whenever git provides them.
+		// only source left. It carries an old path only for a rename git chose to
+		// render as one ("rename from"), and cannot mark a binary file at all,
+		// which is why the raw/numstat entries above are preferred whenever git
+		// provides them.
 		diff.Files = commitFilesFromChanged(changed)
 		diff.Additions, diff.Deletions = totalChanges(diff.Files)
 	}
@@ -1067,6 +1068,7 @@ func commitFilesFromChanged(changed []model.ChangedFile) []CommitFile {
 			Additions: file.Additions,
 			Deletions: file.Deletions,
 			Symlink:   file.Symlink,
+			OldPath:   file.OldPath,
 		})
 	}
 	return files

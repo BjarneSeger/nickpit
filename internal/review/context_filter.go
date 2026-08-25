@@ -183,6 +183,24 @@ func collectFilterCandidatePaths(ctx *model.ReviewContext) []string {
 	return paths
 }
 
+// cleanGitPath tidies a literal git path without touching its separators: the
+// spelling stays the file's own, only noise a payload may add (surrounding
+// whitespace, a "./" prefix, a doubled or dot segment) is removed. It is what
+// makes a literal path comparable to a normalized one — see allowedPathMatches —
+// where normalizeReviewPath cannot be used because folding "\\" into "/" would
+// merge a symlink named `a\b` with a regular file `a/b`.
+func cleanGitPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = path.Clean(strings.TrimPrefix(value, "./"))
+	if value == "." {
+		return ""
+	}
+	return value
+}
+
 func normalizeReviewPath(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "./")

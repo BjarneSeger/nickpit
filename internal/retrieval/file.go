@@ -49,7 +49,16 @@ func (e *LocalEngine) GetFile(_ context.Context, repoRoot, path string) (*FileCo
 // inside repoRoot, enforced via repofs.Open), reporting whether the file was
 // longer than the limit. It reads at most limit+1 bytes so truncation is
 // detected without buffering the whole file.
+//
+// A symlink is read as a symlink: the result is its target path, not the target
+// file's text. Following it would attribute another file's lines to the link's
+// own path — the reviewer would see hundreds of lines of unrelated source under
+// a path whose real content is one pathname, and every line number cited for it
+// would be wrong.
 func readFileCapped(repoRoot, fullPath string, limit int) ([]byte, bool, error) {
+	if target, ok := repofs.LinkTarget(fullPath); ok {
+		return []byte(target), false, nil
+	}
 	f, err := repofs.Open(repoRoot, fullPath)
 	if err != nil {
 		return nil, false, err
@@ -141,6 +150,20 @@ func (e *LocalEngine) GetFileSlice(_ context.Context, repoRoot, path string, sta
 	}
 	if end > 0 && end < start {
 		return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, end)
+	}
+	// A symlink is its target path, so the whole file is line 1 (see
+	// readFileCapped); any range that starts past it selects nothing.
+	if target, ok := repofs.LinkTarget(fullPath); ok {
+		if start > 1 {
+			return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, 1)
+		}
+		return &FileSlice{
+			Path:      normalizedPath,
+			StartLine: 1,
+			EndLine:   1,
+			Content:   normalizeText(target),
+			Language:  detectLanguage(normalizedPath),
+		}, nil
 	}
 	f, err := repofs.Open(repoRoot, fullPath)
 	if err != nil {

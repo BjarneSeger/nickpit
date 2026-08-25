@@ -473,6 +473,46 @@ func TestShowFallsBackToFirstParentWhenCombinedDiffIsEmpty(t *testing.T) {
 	}
 }
 
+// With no raw entries the patch is the only source of the file list, and a rename
+// git rendered as one carries its old path there. Dropping it would report a moved
+// file with no record of where it came from — for a symlink, the move is the whole
+// change.
+func TestShowCarriesRenameOldPathFromPatchOnlyFileList(t *testing.T) {
+	runner := &stubGitRunner{outputs: map[string]string{}}
+	resolved(runner, "mmm", "mmm111")
+	history := newTestHistory(runner)
+	runner.match = func(args []string) (string, bool) {
+		if args[0] != "show" {
+			return "", false
+		}
+		if args[1] == "--no-patch" {
+			return metadataRecord("mmm111", "mmm111", "Ada", "ada@example.com", "2026-08-01T10:00:00Z", "p1 p2", "Merge branch"), true
+		}
+		return strings.Join([]string{
+			"diff --cc dir/link2",
+			"similarity index 100%",
+			"rename from dir/sub/link",
+			"rename to dir/link2",
+			"",
+		}, "\n"), true
+	}
+
+	result, err := history.Show(context.Background(), t.TempDir(), ShowOptions{Commit: "mmm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := result.Commits[0]
+	if len(commit.Files) != 1 || commit.Files[0].Path != "dir/link2" {
+		t.Fatalf("files = %#v", commit.Files)
+	}
+	if commit.Files[0].OldPath != "dir/sub/link" {
+		t.Fatalf("old path = %q, want the rename source the patch names", commit.Files[0].OldPath)
+	}
+	if commit.Files[0].Status != model.FileRenamed {
+		t.Fatalf("status = %q, want a rename", commit.Files[0].Status)
+	}
+}
+
 func TestShowKeepsCombinedPatchWhenGitJSONHasNoHunks(t *testing.T) {
 	runner := &stubGitRunner{outputs: map[string]string{}}
 	resolved(runner, "mmm", "mmm111")

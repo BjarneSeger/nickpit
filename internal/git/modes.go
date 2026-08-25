@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/dgrieser/nickpit/internal/model"
 )
 
 // maxTreeQueryPaths caps how many pathspecs one "ls-tree" call receives so a
@@ -47,7 +49,12 @@ func SymlinkPathsAtRev(ctx context.Context, runner Runner, rev string, paths []s
 	var firstErr error
 	for chunk := range slices.Chunk(paths, maxTreeQueryPaths) {
 		args := make([]string, 0, 5+len(chunk))
-		args = append(args, "ls-tree", "-z", rev, "--")
+		// --full-tree makes git act as though it ran from the repo top level.
+		// Without it both the pathspecs and the printed paths are resolved
+		// relative to the runner's working directory, so every lookup silently
+		// matches nothing whenever that directory is not the top level — a
+		// --repo-root pointing at a subdirectory, for instance.
+		args = append(args, "ls-tree", "-z", "--full-tree", rev, "--")
 		for _, path := range chunk {
 			args = append(args, literalPathspec(path))
 		}
@@ -84,11 +91,31 @@ func collectTreeSymlinks(out string, symlinks map[string]string) {
 // larger than limit. Nothing is trimmed: for a symlink the blob is the target
 // pathname, git appends no separator, and a pathname may legally contain — or end
 // in — a newline, so any trimming would change the target.
+//
+// A LimitedRunner is used when the runner provides one, for two reasons that both
+// matter for a value the caller treats as byte-exact: RunLimited captures stderr
+// separately, so a git warning on an otherwise successful call (an unreadable
+// gitattributes include, an advice notice, fetch chatter) cannot be spliced into
+// the result, and it stops reading at the cap instead of buffering a whole blob
+// only to reject it.
 func ReadBlob(ctx context.Context, runner Runner, blob string, limit int) (string, error) {
 	if runner == nil || blob == "" {
 		return "", errors.New("git: no blob to read")
 	}
-	out, err := runner.Run(ctx, "cat-file", "blob", blob)
+	args := []string{"cat-file", "blob", blob}
+	if limited, ok := runner.(LimitedRunner); ok && limit > 0 {
+		out, truncated, err := limited.RunLimited(ctx, limit, args...)
+		if err != nil {
+			return "", err
+		}
+		if truncated {
+			return "", fmt.Errorf("git: blob %s exceeds %d bytes", blob, limit)
+		}
+		return out, nil
+	}
+	// Plain-Runner fallback (test fakes, wrappers): the whole object is read and
+	// the cap is applied afterwards.
+	out, err := runner.Run(ctx, args...)
 	if err != nil {
 		return "", err
 	}
@@ -96,6 +123,52 @@ func ReadBlob(ctx context.Context, runner Runner, blob string, limit int) (strin
 		return "", fmt.Errorf("git: blob %s exceeds %d bytes", blob, limit)
 	}
 	return out, nil
+}
+
+// MaxSymlinkTargetBytes bounds what is accepted as a link target. POSIX caps a
+// symlink at PATH_MAX; anything larger is not a target, so it is not read into the
+// review context.
+const MaxSymlinkTargetBytes = 4096
+
+// AttachSymlinkTargets fills SymlinkTarget for symlink entries whose patch shows
+// no content at all — a pure rename, where git emits only "rename from/to" lines.
+// Such a change is exactly the one worth reviewing (moving a relative symlink can
+// break its target) and the one an agent cannot judge from the patch, so the blob
+// named by blobFor is read directly. blobFor returns "" for a path whose blob is
+// unknown, which leaves that entry without a target.
+//
+// Entries whose patch does carry the target (an added or changed symlink) are left
+// alone: the diff already shows it, and reading the blob again would only risk
+// disagreeing with what the reviewer sees. An entry that already has a target is
+// never re-read either.
+//
+// A failing read yields no target rather than a guess: the change is reviewed
+// either way, and a wrong target would be worse than a missing one.
+func AttachSymlinkTargets(ctx context.Context, runner Runner, files []model.ChangedFile, hunks []model.DiffHunk, blobFor func(path string) string) {
+	if runner == nil || blobFor == nil {
+		return
+	}
+	hasHunk := make(map[string]bool, len(hunks))
+	for _, hunk := range hunks {
+		hasHunk[hunk.FilePath] = true
+	}
+	for i := range files {
+		file := &files[i]
+		if !file.Symlink || file.SymlinkTarget != "" || hasHunk[file.Path] {
+			continue
+		}
+		blob := blobFor(file.Path)
+		if blob == "" {
+			continue
+		}
+		// The blob IS the target, byte for byte: git appends no separator, and a
+		// pathname may legally end in a newline, so nothing may be trimmed here.
+		target, err := ReadBlob(ctx, runner, blob, MaxSymlinkTargetBytes)
+		if err != nil {
+			continue
+		}
+		file.SymlinkTarget = target
+	}
 }
 
 // FileModes maps a repo-relative path to what "git diff --raw" reports for that
