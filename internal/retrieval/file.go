@@ -559,14 +559,6 @@ func SplitGitLines(content string) []string {
 	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
 }
 
-func splitLines(text string) []string {
-	text = normalizeText(text)
-	if text == "" {
-		return []string{}
-	}
-	return strings.Split(text, "\n")
-}
-
 func detectLanguage(path string) string {
 	return filetype.DetectLanguage(path)
 }
