@@ -946,6 +946,33 @@ func TestLocalEngineKeepsLinkTargetBytesExact(t *testing.T) {
 	}
 }
 
+// A lone carriage return is a legal byte in a pathname and git counts blob lines
+// on LF alone, so a target holding one is ONE line whose bytes stay untouched.
+// Folding it would invent a second line and rename the target.
+func TestLocalEngineKeepsCarriageReturnsInLinkTargets(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "dir/a\rb"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	got, err := engine.GetFile(context.Background(), repoRoot, "link")
+	if err != nil || got.Content != target {
+		t.Fatalf("link content = %q, %v, want the target byte for byte", got.Content, err)
+	}
+	slice, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slice.Content != target || slice.EndLine != 1 {
+		t.Fatalf("slice = %#v, want one line carrying the exact target", slice)
+	}
+	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 2, 2); err == nil {
+		t.Fatal("a carriage return invented a second line")
+	}
+}
+
 // A symlink is read AS a symlink: its content is the target path. Following it
 // would attribute the target file's text to the link's own path — wrong content
 // under a reviewed path, wrong line numbers for every finding about it — and for

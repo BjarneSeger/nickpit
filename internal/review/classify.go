@@ -42,6 +42,12 @@ func stampGeneratedFlags(reviewCtx *model.ReviewContext) {
 // files API reports neither a mode field nor a mode line inside `patch`, so there
 // the reviewed head commit's tree is asked.
 //
+// A deleted path is not in that tree, and the removed side of its patch is exactly
+// where a removed link target sits — so for those entries the change's own commits
+// are asked what they deleted instead (see git.DeletedFileModes). GitHub reports
+// one entry per path, so a deletion mark cannot bleed into a same-path addition
+// the way a diff-derived mark could.
+//
 // Targets: a pure symlink rename emits no hunk and no content in ANY source, so the
 // link target is nowhere in the patch — yet whether a relative target still resolves
 // from the new directory is the whole question such a change raises. The target is
@@ -71,8 +77,20 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 		seen[path] = true
 		paths = append(paths, path)
 	}
+	var deletedPaths []string
+	deletedSeen := make(map[string]bool, len(reviewCtx.ChangedFiles))
+	collectDeleted := func(path string) {
+		if path == "" || deletedSeen[path] {
+			return
+		}
+		deletedSeen[path] = true
+		deletedPaths = append(deletedPaths, path)
+	}
 	for _, file := range reviewCtx.ChangedFiles {
 		switch {
+		case markFromTree && !file.Symlink && file.Status == model.FileDeleted:
+			// The reviewed tree no longer holds this path; its deletion does.
+			collectDeleted(file.Path)
 		case markFromTree && !file.Symlink:
 			collect(file.Path)
 		case file.Symlink && file.SymlinkTarget == "" && !hasHunk[file.Path]:
@@ -81,21 +99,25 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 		}
 	}
 	if markFromTree {
+		// The diff views carry no status, so a deleted path is recognized by the
+		// entry that named it above. Asking the reviewed tree for it would be
+		// wasted work: the deletion listing is what answers for those.
 		for _, file := range reviewCtx.DiffFiles {
-			if !file.Symlink {
+			if !file.Symlink && !deletedSeen[file.FilePath] {
 				collect(file.FilePath)
 			}
 		}
 		for _, hunk := range reviewCtx.DiffHunks {
-			if !hunk.Symlink {
+			if !hunk.Symlink && !deletedSeen[hunk.FilePath] {
 				collect(hunk.FilePath)
 			}
 		}
 	}
-	// The error is deliberately dropped: an unreadable tree means no metadata, and
+	// The errors are deliberately dropped: unreadable history means no metadata, and
 	// the change is reviewed either way.
 	blobs, _ := git.SymlinkPathsAtRev(ctx, runner, reviewCtx.DiffHeadSHA, paths)
-	if len(blobs) == 0 {
+	deletedLinks := deletedSymlinkPaths(ctx, runner, reviewCtx, deletedPaths)
+	if len(blobs) == 0 && len(deletedLinks) == 0 {
 		return
 	}
 	// The keys stay literal git paths, exactly as ls-tree and the SCM payload
@@ -105,14 +127,20 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 	if markFromTree {
 		for i := range reviewCtx.ChangedFiles {
 			file := &reviewCtx.ChangedFiles[i]
-			if !file.Symlink {
-				_, file.Symlink = blobs[file.Path]
+			if file.Symlink {
+				continue
 			}
+			if file.Status == model.FileDeleted {
+				file.Symlink = deletedLinks[file.Path]
+				continue
+			}
+			_, file.Symlink = blobs[file.Path]
 		}
+		// The diff views carry no status, so both listings answer for them.
 		for i := range reviewCtx.DiffFiles {
 			file := &reviewCtx.DiffFiles[i]
 			if !file.Symlink {
-				_, file.Symlink = blobs[file.FilePath]
+				file.Symlink = markedSymlink(blobs, deletedLinks, file.FilePath)
 			}
 		}
 		// The git-json diff format drops DiffFiles, so an unstamped hunk would
@@ -120,7 +148,7 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 		for i := range reviewCtx.DiffHunks {
 			hunk := &reviewCtx.DiffHunks[i]
 			if !hunk.Symlink {
-				_, hunk.Symlink = blobs[hunk.FilePath]
+				hunk.Symlink = markedSymlink(blobs, deletedLinks, hunk.FilePath)
 			}
 		}
 	}
@@ -129,6 +157,40 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 	git.AttachSymlinkTargets(ctx, runner, reviewCtx.ChangedFiles, reviewCtx.DiffHunks, func(path string) string {
 		return blobs[path]
 	})
+}
+
+// deletedSymlinkPaths reports which of paths the change's own commits deleted as
+// symlinks. The commit list is the bound on the lookup: the deletion under review
+// is in one of them, and nothing else is examined.
+func deletedSymlinkPaths(ctx context.Context, runner git.Runner, reviewCtx *model.ReviewContext, paths []string) map[string]bool {
+	if len(paths) == 0 || len(reviewCtx.Commits) == 0 {
+		return nil
+	}
+	commits := make([]string, 0, len(reviewCtx.Commits))
+	for _, commit := range reviewCtx.Commits {
+		if commit.SHA != "" {
+			commits = append(commits, commit.SHA)
+		}
+	}
+	modes, _ := git.DeletedFileModes(ctx, runner, commits, paths)
+	if len(modes) == 0 {
+		return nil
+	}
+	links := make(map[string]bool, len(modes))
+	for path := range modes {
+		if modes.Symlink(path) {
+			links[path] = true
+		}
+	}
+	return links
+}
+
+// markedSymlink reports whether either listing marks path as a symlink.
+func markedSymlink(blobs map[string]string, deletedLinks map[string]bool, path string) bool {
+	if _, ok := blobs[path]; ok {
+		return true
+	}
+	return deletedLinks[path]
 }
 
 // sourceOmitsFileModes reports whether a review source's diff carries no git file

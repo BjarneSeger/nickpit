@@ -7,6 +7,7 @@ import (
 
 	"github.com/dgrieser/nickpit/internal/filetype"
 	"github.com/dgrieser/nickpit/internal/model"
+	"github.com/dgrieser/nickpit/internal/retrieval"
 )
 
 // allowedDiffCodeLocations returns the authoritative old- and new-side hunk
@@ -170,8 +171,12 @@ func rangesOverlap(start, end, hunkStart, hunkLines int) bool {
 // whose patch has no hunk at all. Renaming a symlink emits only "rename from/to"
 // lines, yet moving a relative symlink is precisely what can break its target — so
 // without this the reviewer is told the entry is a symlink and then has every
-// finding about it dropped for pointing outside the (empty) diff scope. The single
-// line of a symlink blob is its target, so line 1 is the whole file.
+// finding about it dropped for pointing outside the (empty) diff scope.
+//
+// The blob of a symlink is its target, so the location spans the target's lines:
+// one line almost always, but a pathname may legally contain a newline, and git
+// then renders the blob as several lines. Scoping only line 1 would drop a valid
+// finding — or block a deterministic repair — anchored on the second.
 func metadataOnlySymlinkLocations(hunks []model.DiffHunk, changed []model.ChangedFile) []model.CodeLocation {
 	if len(changed) == 0 {
 		return nil
@@ -197,9 +202,10 @@ func metadataOnlySymlinkLocations(hunks []model.DiffHunk, changed []model.Change
 			continue
 		}
 		seen[path] = true
+		lines := max(len(retrieval.SplitLinkTargetLines(file.SymlinkTarget)), 1)
 		locations = append(locations, model.CodeLocation{
 			FilePath:  path,
-			LineRange: model.LineRange{Start: 1, End: 1, Count: 1},
+			LineRange: model.LineRange{Start: 1, End: lines, Count: lines},
 			Language:  filetype.DetectLanguage(path),
 			Content:   file.SymlinkTarget,
 		})

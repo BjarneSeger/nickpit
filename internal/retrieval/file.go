@@ -232,10 +232,11 @@ func (e *LocalEngine) GetFileSlice(_ context.Context, repoRoot, path string, sta
 }
 
 // linkTargetSlice answers a line range out of a symlink's target. The target is
-// split exactly as git counts the blob's lines, so the returned range metadata
-// and the returned content describe the same lines.
+// split exactly as git counts the blob's lines (see SplitLinkTargetLines), so the
+// returned range metadata and the returned content describe the same lines, and a
+// carriage return inside a pathname stays a carriage return.
 func linkTargetSlice(normalizedPath, target string, start, end int) (*FileSlice, error) {
-	lines := splitLines(target)
+	lines := SplitLinkTargetLines(target)
 	if start > len(lines) {
 		return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, len(lines))
 	}
@@ -516,6 +517,19 @@ var errSearchLimitReached = fmt.Errorf("search result limit reached")
 func normalizeText(text string) string {
 	text = NormalizeLineEndings(text)
 	return strings.TrimSuffix(text, "\n")
+}
+
+// SplitLinkTargetLines splits a symlink target the way git counts a blob's lines:
+// on LF alone, with at most one trailing LF dropped. A pathname may legally
+// contain a lone carriage return or a CRLF pair, and those bytes are part of the
+// NAME — folding them the way normalizeText folds text-file line endings would
+// both invent lines git does not see and hand back a target that is not the one
+// stored. An empty target has no lines.
+func SplitLinkTargetLines(target string) []string {
+	if target == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(target, "\n"), "\n")
 }
 
 func splitLines(text string) []string {

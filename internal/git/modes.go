@@ -70,6 +70,56 @@ func SymlinkPathsAtRev(ctx context.Context, runner Runner, rev string, paths []s
 	return symlinks, firstErr
 }
 
+// DeletedFileModes reports what the given commits deleted, as "git diff --raw"
+// spells it: the pre-change mode of every deleted path among paths, keyed by path.
+//
+// A deleted path is absent from the reviewed tree, so SymlinkPathsAtRev can say
+// nothing about it — yet the removed side of the patch is exactly where a removed
+// symlink's target sits, and a source that reports no file modes (GitHub) leaves
+// the entry unmarked otherwise. The pre-image mode of the deletion itself is the
+// authority: the commit that removed the path states it.
+//
+// The listing is restricted to the named commits with --no-walk, so nothing walks
+// history: the deletion under review happened in one of the change's own commits,
+// and a commit the checkout does not have simply fails the lookup. --no-renames
+// keeps a deletion a deletion; git would otherwise pair it with an addition
+// elsewhere and drop it from the filter. Sorted --no-walk output is newest-first,
+// so the most recent deletion of a path wins.
+//
+// A failing call yields no modes rather than a guess. The error is returned so a
+// caller that can log it may, but it never invalidates what was collected.
+func DeletedFileModes(ctx context.Context, runner Runner, commits, paths []string) (FileModes, error) {
+	if runner == nil || len(commits) == 0 || len(paths) == 0 {
+		return nil, nil
+	}
+	modes := FileModes{}
+	var firstErr error
+	for commitChunk := range slices.Chunk(commits, maxTreeQueryPaths) {
+		for pathChunk := range slices.Chunk(paths, maxTreeQueryPaths) {
+			args := make([]string, 0, 8+len(commitChunk)+len(pathChunk))
+			args = append(args, "log", "--no-walk", "--format=", "--raw", "-z", "--no-renames", "--diff-filter=D")
+			args = append(args, commitChunk...)
+			args = append(args, "--")
+			for _, path := range pathChunk {
+				args = append(args, literalPathspec(path))
+			}
+			out, err := runner.Run(ctx, args...)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			for path, entry := range ParseRawFileModes(out) {
+				if _, ok := modes[path]; !ok {
+					modes[path] = entry
+				}
+			}
+		}
+	}
+	return modes, firstErr
+}
+
 // collectTreeSymlinks parses "ls-tree -z" output. Each NUL-terminated entry is
 // "<mode> <type> <object>\t<path>"; -z keeps the path literal, so it needs no
 // unquoting.

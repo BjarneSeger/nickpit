@@ -318,6 +318,32 @@ func TestCodeLocationOverlapsAllowedCleansTheCandidateSide(t *testing.T) {
 	}
 }
 
+// A pathname may legally contain a newline, and git then renders the blob as
+// several lines. Scoping only line 1 would drop a valid finding anchored on the
+// second — the patch has no hunk to fall back on.
+func TestMetadataOnlySymlinkLocationsSpanMultiLineTargets(t *testing.T) {
+	changed := []model.ChangedFile{
+		{Path: "link", Status: model.FileRenamed, OldPath: "old/link", Symlink: true, SymlinkTarget: "dir/one\ntwo\n"},
+	}
+
+	locations := metadataOnlySymlinkLocations(nil, changed)
+	if len(locations) != 1 {
+		t.Fatalf("locations = %#v, want one", locations)
+	}
+	if got := locations[0].LineRange; got.Start != 1 || got.End != 2 || got.Count != 2 {
+		t.Fatalf("line range = %#v, want both of the target's lines", got)
+	}
+	second := model.CodeLocation{FilePath: "link", LineRange: model.LineRange{Start: 2, End: 2, Count: 1}}
+	if !codeLocationOverlapsAllowed(second, locations) {
+		t.Fatal("a finding on the target's second line is out of scope")
+	}
+	// A single-line target still occupies exactly one line.
+	single := []model.ChangedFile{{Path: "link", Status: model.FileRenamed, Symlink: true, SymlinkTarget: "../target"}}
+	if got := metadataOnlySymlinkLocations(nil, single)[0].LineRange; got.End != 1 || got.Count != 1 {
+		t.Fatalf("line range = %#v, want one line", got)
+	}
+}
+
 // Scope without evidence would invite a finding the prompt cannot ground: with no
 // hunk, the target and the old path are the entire change.
 func TestMetadataOnlySymlinkLocationsRequireEvidence(t *testing.T) {

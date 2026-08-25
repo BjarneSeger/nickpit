@@ -15,9 +15,11 @@ import (
 // reviewed head rather than from whatever a checkout holds.
 type symlinkTreeRunner struct {
 	symlinks  []string
+	deleted   []string
 	target    string
 	revs      []string
 	blobReads []string
+	logCalls  [][]string
 }
 
 func (r *symlinkTreeRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -31,6 +33,13 @@ func (r *symlinkTreeRunner) Run(_ context.Context, args ...string) (string, erro
 		var out strings.Builder
 		for _, path := range r.symlinks {
 			out.WriteString("120000 blob 32f64f4\t" + path + "\x00")
+		}
+		return out.String(), nil
+	case args[0] == "log":
+		r.logCalls = append(r.logCalls, args)
+		var out strings.Builder
+		for _, path := range r.deleted {
+			out.WriteString(":120000 000000 32f64f4 0000000 D\x00" + path + "\x00")
 		}
 		return out.String(), nil
 	case len(args) == 3 && args[0] == "cat-file" && args[1] == "blob":
@@ -95,6 +104,41 @@ func TestStampSymlinkFlagsMarksEveryViewFromTheHeadTree(t *testing.T) {
 	// All views share one lookup, and it targets the reviewed head.
 	if len(runner.revs) != 1 || runner.revs[0] != "head111" {
 		t.Fatalf("tree lookups = %v, want a single query for head111", runner.revs)
+	}
+}
+
+// A deleted path cannot be in the reviewed tree, so asking only that tree leaves a
+// removed symlink unmarked and its target reviewed as ordinary text. The deletion
+// in the change's own commits is what states the mode.
+func TestStampSymlinkFlagsMarksDeletedSymlinksFromTheirDeletion(t *testing.T) {
+	reviewCtx := &model.ReviewContext{
+		Mode:         model.ModeGitHub,
+		CheckoutRoot: "/checkout",
+		DiffHeadSHA:  "head111",
+		Commits:      []model.CommitSummary{{SHA: "c1"}},
+		ChangedFiles: []model.ChangedFile{
+			{Path: "dir/link", Status: model.FileDeleted},
+			{Path: "main.go", Status: model.FileDeleted},
+		},
+		DiffFiles: []model.DiffFile{{FilePath: "dir/link"}, {FilePath: "main.go"}},
+		DiffHunks: []model.DiffHunk{{FilePath: "dir/link"}, {FilePath: "main.go"}},
+	}
+
+	runner := &symlinkTreeRunner{deleted: []string{"dir/link"}}
+	stampSymlinkFlags(context.Background(), reviewCtx, runner)
+
+	if !reviewCtx.ChangedFiles[0].Symlink || !reviewCtx.DiffFiles[0].Symlink || !reviewCtx.DiffHunks[0].Symlink {
+		t.Fatalf("deleted symlink not marked in every view: %#v / %#v / %#v", reviewCtx.ChangedFiles[0], reviewCtx.DiffFiles[0], reviewCtx.DiffHunks[0])
+	}
+	if reviewCtx.ChangedFiles[1].Symlink || reviewCtx.DiffFiles[1].Symlink || reviewCtx.DiffHunks[1].Symlink {
+		t.Fatalf("deleted regular file marked as a symlink: %#v / %#v / %#v", reviewCtx.ChangedFiles[1], reviewCtx.DiffFiles[1], reviewCtx.DiffHunks[1])
+	}
+	// The deleted paths go to the deletion listing, not to the head tree.
+	if len(runner.logCalls) != 1 {
+		t.Fatalf("deletion listings = %d, want one", len(runner.logCalls))
+	}
+	if len(runner.revs) != 0 {
+		t.Fatalf("head-tree lookups = %v, want none for a change that only deletes", runner.revs)
 	}
 }
 

@@ -316,6 +316,66 @@ func TestParseRawFileModesKeepsBlobNames(t *testing.T) {
 	}
 }
 
+// A deleted path is absent from the reviewed tree, so only the deletion itself
+// states what the path was. The lookup must stay bounded to the change's own
+// commits and must not let git re-read a deletion as a rename.
+func TestDeletedFileModesReadsThePreImageMode(t *testing.T) {
+	runner := &stubGitRunner{
+		match: func(args []string) (string, bool) {
+			if args[0] != "log" {
+				return "", false
+			}
+			return strings.Join([]string{
+				":120000 000000 32f64f4 0000000 D\x00dir/link\x00",
+				":100644 000000 45b983b 0000000 D\x00main.go\x00",
+			}, ""), true
+		},
+	}
+
+	modes, err := DeletedFileModes(context.Background(), runner, []string{"c1", "c2"}, []string{"dir/link", "main.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modes.Symlink("dir/link") {
+		t.Fatalf("deleted symlink not marked: %#v", modes)
+	}
+	if modes.Symlink("main.go") {
+		t.Fatalf("deleted regular file marked as a symlink: %#v", modes)
+	}
+	args := runner.calls[0]
+	for _, want := range []string{"--no-walk", "--no-renames", "--diff-filter=D", "c1", "c2"} {
+		if !slices.Contains(args, want) {
+			t.Fatalf("missing %q in %v", want, args)
+		}
+	}
+	// The pathspecs stay literal, and the commits stay on the other side of "--".
+	sep := slices.Index(args, "--")
+	if sep < 0 || !slices.Contains(args[sep+1:], ":(literal)dir/link") {
+		t.Fatalf("pathspecs = %v", args)
+	}
+	if slices.Contains(args[sep+1:], "c1") {
+		t.Fatalf("a commit leaked into the pathspecs: %v", args)
+	}
+}
+
+// Without commits there is nothing to bound the lookup, and a failing call yields
+// no modes rather than a guess.
+func TestDeletedFileModesFailsClosed(t *testing.T) {
+	modes, err := DeletedFileModes(context.Background(), &stubGitRunner{}, nil, []string{"dir/link"})
+	if modes != nil || err != nil {
+		t.Fatalf("modes = %#v, err = %v, want nothing without commits", modes, err)
+	}
+	failing := &stubGitRunner{matchErr: func(args []string) error { return errors.New("unknown revision") }}
+	failing.match = func(args []string) (string, bool) { return "", args[0] == "log" }
+	modes, err = DeletedFileModes(context.Background(), failing, []string{"c1"}, []string{"dir/link"})
+	if len(modes) != 0 {
+		t.Fatalf("modes = %#v, want none from a failing call", modes)
+	}
+	if err == nil {
+		t.Fatal("the failing call was not reported")
+	}
+}
+
 // A symlink's blob IS its target: git appends no separator, and POSIX permits a
 // newline in a pathname, so nothing may be trimmed off a blob read.
 func TestReadBlobKeepsBytesVerbatim(t *testing.T) {
