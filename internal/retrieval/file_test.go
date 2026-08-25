@@ -759,7 +759,7 @@ func TestReadFileCappedTrimsPartialRune(t *testing.T) {
 	if err := os.WriteFile(path, []byte("aa€"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	data, truncated, err := readFileCapped(dir, path, 3)
+	data, truncated, _, err := readFileCapped(dir, path, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -887,51 +887,251 @@ func TestLocalEngineGetFileSliceReachesLinesBeyondByteCap(t *testing.T) {
 	}
 }
 
-func TestLocalEngineRejectsSymlinkEscapes(t *testing.T) {
+// lstat and readlink resolve every component but the last, so a link reached
+// THROUGH an escaping directory link lives outside the checkout — reading it would
+// report a target from a tree the repository does not contain.
+func TestLocalEngineRejectsLinksBehindAnEscapingParent(t *testing.T) {
 	repoRoot := t.TempDir()
 	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("hidden-secret"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repoRoot, "inside.txt"), []byte("inside content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(repoRoot, "evil.txt")); err != nil {
+	if err := os.Symlink("/etc/shadow", filepath.Join(outside, "secret-link")); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(repoRoot, "inside.txt"), filepath.Join(repoRoot, "ok.txt")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(repoRoot, "escape")); err != nil {
 		t.Fatal(err)
 	}
 	engine := NewLocalEngine()
 
-	if _, err := engine.GetFile(context.Background(), repoRoot, "evil.txt"); err == nil {
-		t.Fatal("GetFile followed a symlink outside the repo")
+	if got, err := engine.GetFile(context.Background(), repoRoot, "escape/secret-link"); err == nil {
+		t.Fatalf("read a link outside the repo: %#v", got)
 	}
-	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "evil.txt", 1, 1); err == nil {
-		t.Fatal("GetFileSlice followed a symlink outside the repo")
+	if got, err := engine.GetFileSlice(context.Background(), repoRoot, "escape/secret-link", 1, 1); err == nil {
+		t.Fatalf("sliced a link outside the repo: %#v", got)
+	}
+}
+
+// A pathname may legally contain — or end in — a newline or a carriage return, and
+// a symlink's content IS that pathname. Normalizing it would hand the reviewer a
+// target that is not the one stored, and slicing it must count the lines git
+// counts, or the returned range and the returned content disagree.
+func TestLocalEngineKeepsLinkTargetBytesExact(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "dir/odd\r\nname\n"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	got, err := engine.GetFile(context.Background(), repoRoot, "link")
+	if err != nil || got.Content != target {
+		t.Fatalf("link content = %q, %v, want the target byte for byte", got.Content, err)
+	}
+	// git renders that blob as two lines ("dir/odd\r" and "name"), so both are
+	// reachable and the reported range matches the returned content.
+	second, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Content != "name" || second.StartLine != 2 || second.EndLine != 2 {
+		t.Fatalf("second line = %#v, want the target's second line", second)
+	}
+	whole, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.EndLine != 2 {
+		t.Fatalf("slice range = %d-%d, want both lines", whole.StartLine, whole.EndLine)
+	}
+	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 3, 3); err == nil {
+		t.Fatal("a range past the target returned a slice")
+	}
+}
+
+// Every consumer that reports a line number has to count a link target's lines the
+// way git does, or a location a tool reported is rejected as outside the diff.
+// A lone carriage return in a pathname is part of the NAME, so it starts no line.
+//
+// The query side is unaffected on purpose: NormalizeFindLinesCode folds line
+// endings in model-supplied text, so an exact-target find_lines query carrying a
+// raw carriage return still will not match one. That is query canonicalization,
+// not line counting.
+func TestLinkTargetLineNumbersAgreeAcrossTools(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "dir/a\rb"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	// Searching the text after the carriage return must report line 1, not line 2.
+	results, err := engine.Search(context.Background(), repoRoot, "link", "b", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.ResultCount != 1 || results.Results[0].CodeLocation.LineRange.Start != 1 {
+		t.Fatalf("search results = %#v, want one match on line 1", results.Results)
+	}
+	if got := results.Results[0].CodeLocation.Content; got != target {
+		t.Fatalf("search content = %q, want the target byte for byte", got)
+	}
+	slice, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 1, 0)
+	if err != nil || slice.EndLine != 1 {
+		t.Fatalf("slice = %#v, %v, want the same single line", slice, err)
+	}
+
+	// A plain target is reachable by exact find_lines query, which is what a
+	// code-location repair uses.
+	if err := os.Symlink("../plain/target.txt", filepath.Join(repoRoot, "plain")); err != nil {
+		t.Fatal(err)
+	}
+	found, err := engine.FindLines(context.Background(), repoRoot, "plain", "../plain/target.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.MatchCount != 1 || found.Matches[0].CodeLocation.LineRange.Start != 1 {
+		t.Fatalf("find_lines matches = %#v, want line 1", found.Matches)
+	}
+
+	// A real line break is still a line break.
+	if err := os.Symlink("dir/one\ntwo", filepath.Join(repoRoot, "multi")); err != nil {
+		t.Fatal(err)
+	}
+	multi, err := engine.Search(context.Background(), repoRoot, "multi", "two", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.ResultCount != 1 || multi.Results[0].CodeLocation.LineRange.Start != 2 {
+		t.Fatalf("multi-line target results = %#v, want a match on line 2", multi.Results)
+	}
+}
+
+// A broken symlink is exactly the one worth reviewing, and a code-location repair
+// has to be able to read it. Stat resolves the link and fails with ENOENT, so the
+// link has to be recognized before it.
+func TestLocalEngineSearchesBrokenSymlinks(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "../missing/target.txt"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	found, err := engine.FindLines(context.Background(), repoRoot, "link", target)
+	if err != nil {
+		t.Fatalf("find_lines on a broken link: %v", err)
+	}
+	if found.MatchCount != 1 || found.Matches[0].CodeLocation.FilePath != "link" {
+		t.Fatalf("matches = %#v, want the link's own target", found.Matches)
+	}
+	results, err := engine.Search(context.Background(), repoRoot, "link", "missing", 0, 10, false)
+	if err != nil {
+		t.Fatalf("search on a broken link: %v", err)
+	}
+	if results.ResultCount != 1 {
+		t.Fatalf("results = %#v, want the target line", results.Results)
+	}
+	// A link to a directory is one entry too, not a walk of the target tree.
+	if err := os.Mkdir(filepath.Join(repoRoot, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "real", "f.txt"), []byte("needle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(repoRoot, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	walked, err := engine.Search(context.Background(), repoRoot, "dirlink", "needle", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walked.ResultCount != 0 {
+		t.Fatalf("a directory link was walked: %#v", walked.Results)
+	}
+}
+
+// A lone carriage return is a legal byte in a pathname and git counts blob lines
+// on LF alone, so a target holding one is ONE line whose bytes stay untouched.
+// Folding it would invent a second line and rename the target.
+func TestLocalEngineKeepsCarriageReturnsInLinkTargets(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "dir/a\rb"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	got, err := engine.GetFile(context.Background(), repoRoot, "link")
+	if err != nil || got.Content != target {
+		t.Fatalf("link content = %q, %v, want the target byte for byte", got.Content, err)
+	}
+	slice, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slice.Content != target || slice.EndLine != 1 {
+		t.Fatalf("slice = %#v, want one line carrying the exact target", slice)
+	}
+	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 2, 2); err == nil {
+		t.Fatal("a carriage return invented a second line")
+	}
+}
+
+// A symlink is read AS a symlink: its content is the target path. Following it
+// would attribute the target file's text to the link's own path — wrong content
+// under a reviewed path, wrong line numbers for every finding about it — and for
+// a link that leaves the checkout it would read a file outside the repository.
+func TestLocalEngineReadsSymlinksWithoutFollowing(t *testing.T) {
+	repoRoot := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	insideFile := filepath.Join(repoRoot, "inside.txt")
+	if err := os.WriteFile(outsideFile, []byte("hidden-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(insideFile, []byte("inside content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(repoRoot, "evil.txt")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := os.Symlink(insideFile, filepath.Join(repoRoot, "ok.txt")); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewLocalEngine()
+
+	escaping, err := engine.GetFile(context.Background(), repoRoot, "evil.txt")
+	if err != nil || escaping.Content != outsideFile {
+		t.Fatalf("escaping symlink read = %#v, %v, want its target path", escaping, err)
+	}
+	slice, err := engine.GetFileSlice(context.Background(), repoRoot, "evil.txt", 1, 1)
+	if err != nil || slice.Content != outsideFile {
+		t.Fatalf("escaping symlink slice = %#v, %v, want its target path", slice, err)
+	}
+	// Line 1 is the whole link, so a range starting past it selects nothing.
+	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "evil.txt", 2, 3); err == nil {
+		t.Fatal("a range past the link target returned a slice")
 	}
 	got, err := engine.GetFile(context.Background(), repoRoot, "ok.txt")
-	if err != nil || got.Content != "inside content" {
-		t.Fatalf("in-repo symlink read = %#v, %v", got, err)
+	if err != nil || got.Content != insideFile {
+		t.Fatalf("in-repo symlink read = %#v, %v, want its target path", got, err)
 	}
 	if _, err := engine.GetFile(context.Background(), repoRoot, "inside.txt"); err != nil {
 		t.Fatalf("plain file read failed: %v", err)
 	}
 
-	// The search walk must skip the escaping symlink instead of surfacing its target.
+	// The search walk sees link targets, never the linked file's content.
 	results, err := engine.Search(context.Background(), repoRoot, "", "hidden-secret", 0, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if results.ResultCount != 0 {
-		t.Fatalf("search leaked symlink target: %#v", results.Results)
+		t.Fatalf("search leaked the content behind a symlink: %#v", results.Results)
 	}
-	// Searching the symlinked file directly skips it like any unreadable file.
+	// Searching the symlinked file directly reads the link, not the target file.
 	direct, err := engine.Search(context.Background(), repoRoot, "evil.txt", "hidden-secret", 0, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if direct.ResultCount != 0 {
-		t.Fatalf("direct search leaked symlink target: %#v", direct.Results)
+		t.Fatalf("direct search leaked the content behind a symlink: %#v", direct.Results)
 	}
 }

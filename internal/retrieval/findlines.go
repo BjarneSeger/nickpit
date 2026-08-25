@@ -64,7 +64,9 @@ func FindLinesIn(content *FileContent, code string) *FindLinesResult {
 func matchFindLinesLimit(relPath, content, code string, maxMatches int) []FindLinesMatch {
 	matches := make([]FindLinesMatch, 0)
 	matcher := codeBlockMatcher(SplitFindLines(NormalizeFindLinesCode(code)), true)
-	rawFileLines := SplitFindLines(normalizeFindLinesContent(content))
+	// Content arrives already line-normalized, whether from the repo walk or from
+	// a FileContent; a link target keeps its own bytes, so the split stays LF-only.
+	rawFileLines := SplitGitLines(content)
 	language := detectLanguage(relPath)
 	for _, span := range matcher(rawFileLines) {
 		matches = append(matches, FindLinesMatch{
@@ -167,11 +169,6 @@ func NormalizeFindLinesCode(code string) string {
 		lines = lines[:len(lines)-1]
 	}
 	return strings.Join(lines, "\n")
-}
-
-func normalizeFindLinesContent(content string) string {
-	content = NormalizeLineEndings(content)
-	return strings.TrimSuffix(content, "\n")
 }
 
 // NormalizeSearchQuery returns the canonical form of a search query: line

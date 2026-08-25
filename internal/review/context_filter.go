@@ -183,6 +183,23 @@ func collectFilterCandidatePaths(ctx *model.ReviewContext) []string {
 	return paths
 }
 
+// cleanGitPath removes from a path only what cannot be part of a git filename: a
+// "./" prefix, an empty or "." segment. Git trees hold no empty and no ".."
+// component, so this can never merge two distinct legal names. Whitespace and
+// separators are left alone — " foo" and "foo" are two different files, and so
+// are `a\b` and `a/b` — which is why neither TrimSpace nor normalizeReviewPath
+// may be applied to an authoritative git path. See allowedPathMatches.
+func cleanGitPath(value string) string {
+	if value == "" {
+		return ""
+	}
+	value = path.Clean(strings.TrimPrefix(value, "./"))
+	if value == "." {
+		return ""
+	}
+	return value
+}
+
 func normalizeReviewPath(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "./")

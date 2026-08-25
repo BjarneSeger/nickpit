@@ -105,6 +105,37 @@ func evalSymlinksDeepest(path string) (string, error) {
 	}
 }
 
+// LinkTarget reports the target of fullPath when the path itself is a symlink.
+// The check is an lstat and the read is a readlink, so nothing is followed and no
+// file outside the repository is ever opened. A path that is not a symlink, or
+// that cannot be stat'd, reports false.
+//
+// Callers use this to read a symlink AS a symlink: its content is the target
+// path, and following it would return the target file's text under the link's
+// own path. With core.symlinks=false git materializes the blob as a regular file
+// holding the target, so there the same bytes arrive through the ordinary read
+// path instead.
+//
+// The parent directory is checked first, because lstat and readlink resolve every
+// component BUT the last: with `escape -> /outside` inside the checkout,
+// "escape/secret-link" would otherwise report a link that lives outside the
+// repository entirely. A parent that escapes reports false, which leaves the
+// caller on its ordinary read path — where Open rejects the same escape.
+func LinkTarget(repoRoot, fullPath string) (string, bool) {
+	if err := VerifyNoSymlinkEscape(repoRoot, filepath.Dir(fullPath)); err != nil {
+		return "", false
+	}
+	info, err := os.Lstat(fullPath)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return "", false
+	}
+	target, err := os.Readlink(fullPath)
+	if err != nil {
+		return "", false
+	}
+	return target, true
+}
+
 // Open opens fullPath for reading after verifying that following symlinks
 // keeps it inside repoRoot. All retrieval file reads must go through Open or
 // ReadFile so a crafted symlink cannot leak files outside the checkout.

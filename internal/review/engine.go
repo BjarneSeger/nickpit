@@ -43,9 +43,14 @@ type Engine struct {
 	// endpoint and, when the profile's small model lives elsewhere, the small one.
 	// Written once before the pipeline runs and read-only afterwards, like
 	// additionalStyleGuides below.
-	clients                *llm.ClientSet
-	retrieval              retrieval.Engine
-	history                git.History
+	clients   *llm.ClientSet
+	retrieval retrieval.Engine
+	history   git.History
+	// gitRunner builds the git runner used for the repo-metadata lookups that
+	// are not part of the history tools (symlink marks and link targets). A
+	// factory, because the checkout root is only known once a context resolves.
+	// Overridable through SetGitRunner, like history above.
+	gitRunner              func(repoRoot string) git.Runner
 	config                 config.Profile
 	trimmer                *Trimmer
 	logger                 *logging.Logger
@@ -192,6 +197,9 @@ func NewEngine(source model.ReviewSource, llmClient llm.Client, retrievalEngine 
 			GitLabToken:   profile.GitLabToken,
 			GitLabBaseURL: profile.GitLabBaseURL,
 		}),
+		gitRunner: func(repoRoot string) git.Runner {
+			return git.ExecRunner{RepoRoot: repoRoot}
+		},
 		config:                 profile,
 		searchToolOptimization: true,
 		toolchainCapture:       toolchain.Capture,
@@ -214,6 +222,22 @@ func (e *Engine) SetSmallClient(client llm.Client, smallProfile config.Profile) 
 // production code uses the git-backed provider built in NewEngine.
 func (e *Engine) SetHistory(history git.History) {
 	e.history = history
+}
+
+// SetGitRunner overrides the factory for repo-metadata git runners. Intended for
+// tests; production code uses the process-spawning runner built in NewEngine.
+func (e *Engine) SetGitRunner(fn func(repoRoot string) git.Runner) {
+	e.gitRunner = fn
+}
+
+// newGitRunner returns the runner for repoRoot. An Engine built as a bare struct
+// literal (tests, embedded uses) has no factory, so the process-spawning runner
+// stays the default.
+func (e *Engine) newGitRunner(repoRoot string) git.Runner {
+	if e.gitRunner == nil {
+		return git.ExecRunner{RepoRoot: repoRoot}
+	}
+	return e.gitRunner(repoRoot)
 }
 
 // SetToolchainCapture overrides the toolchain version detector. Intended for
@@ -330,6 +354,7 @@ func (e *Engine) resolveAndTrimContextAs(ctx context.Context, req model.ReviewRe
 	reviewCtx.CheckoutRoot = req.RepoRoot
 	reviewCtx.Identifier = req.Identifier
 	stampGeneratedFlags(reviewCtx)
+	stampSymlinkFlags(ctx, reviewCtx, e.newGitRunner(reviewCtx.CheckoutRoot))
 	if allFiltered, err := e.applyReviewContextFilter(ctx, reviewCtx, req, contextFilter); err != nil {
 		return nil, err
 	} else if allFiltered {
@@ -345,21 +370,7 @@ func (e *Engine) resolveAndTrimContextAs(ctx context.Context, req model.ReviewRe
 	}
 
 	if req.IncludeFullFiles && e.retrieval != nil && req.RepoRoot != "" {
-		e.logf(ctx, "Including full files: count=%d", len(reviewCtx.ChangedFiles))
-		for _, file := range reviewCtx.ChangedFiles {
-			e.logf(ctx, "Retrieving file: path=%s", file.Path)
-			content, err := e.retrieval.GetFile(ctx, req.RepoRoot, file.Path)
-			if err != nil {
-				e.logf(ctx, "Skipping file retrieval: path=%s error=%v", file.Path, err)
-				continue
-			}
-			reviewCtx.SupplementalContext = append(reviewCtx.SupplementalContext, model.SupplementalFile{
-				Path:     file.Path,
-				Content:  content.Content,
-				Language: content.Language,
-				Kind:     "full_file",
-			})
-		}
+		e.appendFullFiles(ctx, reviewCtx, req.RepoRoot)
 	}
 
 	// Scope checks must use the complete filtered diff, not the prompt-budget
@@ -931,7 +942,7 @@ func (e *Engine) prepareFindingsForVerification(ctx context.Context, reviewCtx *
 	if req.DisableDiffScope || reviewCtx == nil || reviewCtx.DiffScopeHunks == nil {
 		return nil
 	}
-	allowed := allowedDiffCodeLocations(reviewCtx.DiffScopeHunks)
+	allowed := allowedDiffCodeLocations(reviewCtx.DiffScopeHunks, reviewCtx.ChangedFiles)
 	relocate := e.diffScopeCodeLocationRelocator(req.RepoRoot, allowed)
 	var warnings []string
 	for i := range vectorResults {
@@ -2982,6 +2993,43 @@ func addDetectorLanguages(seen map[string]struct{}, path, content string) {
 }
 
 const maxStyleGuideProbeBytes = 1 << 20
+
+// appendFullFiles inlines the current content of every changed file as
+// supplemental context.
+//
+// Symlinks are skipped: a link's whole content is its target path, which the diff
+// already shows, so there is nothing left to inline. (Retrieval reads a link as a
+// link rather than following it, so the target's text cannot land here either.)
+//
+// Deleted entries are skipped too. There is nothing to read for an ordinary
+// deletion, and replacing a file with a symlink produces two entries for one path
+// — a deleted regular file plus an added symlink — where reading the deleted entry
+// would land on the symlink that now occupies the path and inline its target.
+func (e *Engine) appendFullFiles(ctx context.Context, reviewCtx *model.ReviewContext, repoRoot string) {
+	e.logf(ctx, "Including full files: count=%d", len(reviewCtx.ChangedFiles))
+	for _, file := range reviewCtx.ChangedFiles {
+		if file.Status == model.FileDeleted {
+			e.logf(ctx, "Skipping file retrieval: path=%s reason=deleted", file.Path)
+			continue
+		}
+		if file.Symlink {
+			e.logf(ctx, "Skipping file retrieval: path=%s reason=symlink", file.Path)
+			continue
+		}
+		e.logf(ctx, "Retrieving file: path=%s", file.Path)
+		content, err := e.retrieval.GetFile(ctx, repoRoot, file.Path)
+		if err != nil {
+			e.logf(ctx, "Skipping file retrieval: path=%s error=%v", file.Path, err)
+			continue
+		}
+		reviewCtx.SupplementalContext = append(reviewCtx.SupplementalContext, model.SupplementalFile{
+			Path:     file.Path,
+			Content:  content.Content,
+			Language: content.Language,
+			Kind:     "full_file",
+		})
+	}
+}
 
 func readReviewFile(root, path string) string {
 	if root == "" || path == "" {
