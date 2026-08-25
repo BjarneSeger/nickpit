@@ -1256,3 +1256,42 @@ steps:
 		t.Fatalf("merge context = %+v, want everything", merge)
 	}
 }
+
+// Step overrides land on an already-normalized profile, so the profile-level
+// rejection of a negative max_output_retries never sees them. Zero is the
+// unlimited setting, which makes a negative value malformed rather than
+// smaller — and an unvalidated one would reach a retry loop.
+func TestValidateRejectsNegativeMaxOutputRetries(t *testing.T) {
+	neg := -1
+	specs := map[string]Spec{
+		"step": {Version: SpecVersion, Steps: []StepEntry{
+			{Type: StepReviewPrefix + "security", Config: &StepOverride{MaxOutputRetries: &neg}},
+		}},
+		"internal agent": {Version: SpecVersion, Steps: []StepEntry{
+			{Type: StepReviewPrefix + "security", Config: &StepOverride{Nudge: &AgentOverride{MaxOutputRetries: &neg}}},
+		}},
+		"pipeline child": {Version: SpecVersion, Steps: []StepEntry{
+			{Pipeline: []StepEntry{
+				{Type: StepMerge, Config: &StepOverride{MaxOutputRetries: &neg}},
+				{Type: StepFinalize},
+				{Type: StepVerdict},
+			}},
+		}},
+	}
+	for name, spec := range specs {
+		t.Run(name, func(t *testing.T) {
+			err := spec.Validate()
+			if err == nil || !strings.Contains(err.Error(), "max_output_retries must be non-negative") {
+				t.Fatalf("error = %v, want max_output_retries non-negative message", err)
+			}
+		})
+	}
+
+	zero := 0
+	unlimited := Spec{Version: SpecVersion, Steps: []StepEntry{
+		{Type: StepReviewPrefix + "security", Config: &StepOverride{MaxOutputRetries: &zero}},
+	}}
+	if err := unlimited.Validate(); err != nil {
+		t.Fatalf("zero max_output_retries rejected: %v", err)
+	}
+}

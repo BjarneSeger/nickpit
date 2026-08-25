@@ -490,7 +490,13 @@ func (e *Engine) reviewWithoutTools(ctx context.Context, llmReq *llm.ReviewReque
 			// Through the shared helper: it is the same event as the agent
 			// loop's, so it belongs on the same agents' progress streams and
 			// carries the same ctx identity rather than an anonymous line.
-			e.logOutputRetriesExhausted(ctx, loopReq, state, attempt, fmt.Sprintf("invalid JSON in no-tools call: reason=%q missing=%v", invalidResp.Reason, invalidResp.MissingFields), "invalid JSON")
+			//
+			// With no state, though: this loop runs its own retry budget, whose
+			// retry lines are printed whatever the agent loop already spent, so
+			// sharing the loop's once-per-budget guard would swallow this
+			// loop's give-up and leave those lines trailing off. It returns
+			// right after, so it has nothing of its own to repeat.
+			e.logOutputRetriesExhausted(ctx, loopReq, nil, attempt, fmt.Sprintf("invalid JSON in no-tools call: reason=%q missing=%v", invalidResp.Reason, invalidResp.MissingFields), "invalid JSON")
 			return nil, err
 		}
 		if invalidResp.ReasoningEffort != "" {

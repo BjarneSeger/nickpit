@@ -72,10 +72,15 @@ func RetryBudget(spent, limit int, name string) string {
 }
 
 // RetriesRemaining reports whether a retry loop that has already made `used`
-// retries may make another. A limit of zero or less is unlimited, the meaning
-// every configured retry limit carries; keeping the reading in one place is
-// what stops one loop from treating a configured zero as "no retries at all"
-// while its neighbours retry forever.
+// retries may make another. Exactly zero is unlimited, the meaning every
+// configured retry limit carries; keeping the reading in one place is what
+// stops one loop from treating a configured zero as "no retries at all" while
+// its neighbours retry forever.
+//
+// A negative limit is not unlimited. Config validation rejects one, but a limit
+// reaching a loop unvalidated must not turn a malformed value into an unbounded
+// run of paid requests, so it retries nothing — which is what the loops that
+// read a negative limit did before this reading was shared.
 func RetriesRemaining(used, limit int) bool {
-	return limit <= 0 || used < limit
+	return limit == 0 || used < limit
 }

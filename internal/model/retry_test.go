@@ -114,3 +114,28 @@ func TestRetryBudgetLine(t *testing.T) {
 		}
 	}
 }
+
+// Zero is the unlimited setting every retry limit carries, but a negative one
+// is malformed rather than smaller: turning it into "unlimited" would let a
+// value config validation rejects run up an unbounded series of paid requests.
+func TestRetriesRemaining(t *testing.T) {
+	cases := []struct {
+		name  string
+		used  int
+		limit int
+		want  bool
+	}{
+		{"unlimited at zero", 100, 0, true},
+		{"under the limit", 2, 5, true},
+		{"at the limit", 5, 5, false},
+		{"over the limit", 6, 5, false},
+		{"negative retries nothing", 0, -1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RetriesRemaining(tc.used, tc.limit); got != tc.want {
+				t.Fatalf("RetriesRemaining(%d, %d) = %t, want %t", tc.used, tc.limit, got, tc.want)
+			}
+		})
+	}
+}

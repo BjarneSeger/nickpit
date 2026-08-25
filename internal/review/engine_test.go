@@ -5297,3 +5297,47 @@ func TestLogOutputRetriesExhaustedLogsOncePerLoop(t *testing.T) {
 		t.Fatalf("missing %q in:\n%s", want, progress.String())
 	}
 }
+
+// The no-tools fallback runs its own retry budget, and its retry lines print
+// whatever the agent loop already spent on the shared one. Sharing the loop's
+// once-per-budget guard would swallow this loop's give-up and leave those lines
+// trailing off — the silent exit the give-up exists to prevent.
+func TestReviewWithoutToolsGiveUpSurvivesAnEarlierLoopGiveUp(t *testing.T) {
+	invalid := func() error {
+		return &llm.InvalidResponseError{RawContent: "malformed", Reason: "response is not valid JSON"}
+	}
+	llmClient := &scriptedLLM{results: []scriptedLLMResult{{err: invalid()}, {err: invalid()}}}
+	engine := nudgeTestEngine(llmClient)
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	llmReq := &llm.ReviewRequest{Model: "test-model", SchemaKind: llm.SchemaKindReview}
+	messages := []llm.Message{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "task"},
+	}
+	loopReq := agentLoopRequest{
+		AgentName:                  "Test Reviewer",
+		AgentKind:                  "review",
+		MaxOutputRetries:           1,
+		JSONRetryProgressAgentName: "Test Reviewer",
+		NoToolsMessages: func(m []llm.Message) ([]llm.Message, error) {
+			return append([]llm.Message(nil), m...), nil
+		},
+	}
+	// An earlier turn of the agent loop already gave up on the shared budget.
+	state := newAgentLoopState()
+	state.outputRetriesExhaustedLogged = true
+
+	if _, err := engine.reviewWithoutTools(context.Background(), llmReq, "review", "", messages, "", "", false, 1, nil, loopReq, state, nil); err == nil {
+		t.Fatal("expected the exhausted output retries to fail the call")
+	}
+	got := progress.String()
+	for _, want := range []string{"retry 1/1 invalid JSON", "warn invalid JSON after 1 retry"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}

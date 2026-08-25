@@ -321,9 +321,12 @@ func (c *Checker) reviewProbeWithMode(ctx context.Context, req *llm.ReviewReques
 // the review it was meant to green-light. Unlimited therefore falls back to the
 // default budget, in this one documented place.
 func (c *Checker) probeOutputRetries() int {
-	if c.profile.MaxOutputRetries <= 0 {
+	if c.profile.MaxOutputRetries == 0 {
 		return config.DefaultMaxOutputRetries
 	}
+	// A negative limit is malformed rather than unlimited, and passing it
+	// through leaves RetriesRemaining to retry nothing, as it does everywhere
+	// else.
 	return c.profile.MaxOutputRetries
 }
 
