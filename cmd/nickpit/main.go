@@ -139,54 +139,62 @@ func (a *app) newLogger() *logging.Logger {
 }
 
 type app struct {
-	model                   string
-	smallModel              string
-	baseURL                 string
-	apiKey                  string
-	smallBaseURL            string
-	smallAPIKey             string
-	workDir                 string
-	profile                 string
-	profileSet              bool
-	temperature             float64
-	temperatureSet          bool
-	topP                    float64
-	topPSet                 bool
-	topK                    int
-	topKSet                 bool
-	presencePenalty         float64
-	presencePenaltySet      bool
-	extraBody               string
-	maxOutputTokens         int
-	maxOutputTokensSet      bool
-	smallMaxTokens          int
-	smallMaxTokensSet       bool
-	smallTemperature        float64
-	smallTemperatureSet     bool
-	smallTopP               float64
-	smallTopPSet            bool
-	smallTopK               int
-	smallTopKSet            bool
-	smallPresencePenalty    float64
-	smallPresencePenaltySet bool
-	smallExtraBody          string
-	maxContextTokens        int
-	maxContextTokensSet     bool
-	maxRequestBytes         int
-	maxRequestBytesSet      bool
-	maxToolResultPercent    int
-	maxToolResultPercentSet bool
-	includeFullFiles        bool
-	includeComments         bool
-	includeCommits          bool
-	includePaths            []string
-	includePathsSet         bool
-	excludePaths            []string
-	excludePathsSet         bool
-	includeContent          []string
-	includeContentSet       bool
-	excludeContent          []string
-	excludeContentSet       bool
+	model                     string
+	smallModel                string
+	baseURL                   string
+	apiKey                    string
+	smallBaseURL              string
+	smallAPIKey               string
+	workDir                   string
+	profile                   string
+	profileSet                bool
+	temperature               float64
+	temperatureSet            bool
+	topP                      float64
+	topPSet                   bool
+	topK                      int
+	topKSet                   bool
+	minP                      float64
+	minPSet                   bool
+	presencePenalty           float64
+	presencePenaltySet        bool
+	repetitionPenalty         float64
+	repetitionPenaltySet      bool
+	extraBody                 string
+	maxOutputTokens           int
+	maxOutputTokensSet        bool
+	smallMaxTokens            int
+	smallMaxTokensSet         bool
+	smallTemperature          float64
+	smallTemperatureSet       bool
+	smallTopP                 float64
+	smallTopPSet              bool
+	smallTopK                 int
+	smallTopKSet              bool
+	smallMinP                 float64
+	smallMinPSet              bool
+	smallPresencePenalty      float64
+	smallPresencePenaltySet   bool
+	smallRepetitionPenalty    float64
+	smallRepetitionPenaltySet bool
+	smallExtraBody            string
+	maxContextTokens          int
+	maxContextTokensSet       bool
+	maxRequestBytes           int
+	maxRequestBytesSet        bool
+	maxToolResultPercent      int
+	maxToolResultPercentSet   bool
+	includeFullFiles          bool
+	includeComments           bool
+	includeCommits            bool
+	includePaths              []string
+	includePathsSet           bool
+	excludePaths              []string
+	excludePathsSet           bool
+	includeContent            []string
+	includeContentSet         bool
+	excludeContent            []string
+	excludeContentSet         bool
 	// styleGuides needs no companion Set bool: CLI values append to the
 	// profile's list, so an unset (nil) flag is indistinguishable from empty.
 	styleGuides                   []string
@@ -350,7 +358,9 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().Var(newTrackedFloatValue(&cli.temperature, &cli.temperatureSet), "temperature", "Sampling temperature")
 	root.PersistentFlags().Var(newTrackedFloatValue(&cli.topP, &cli.topPSet), "top-p", "Nucleus sampling probability")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.topK, &cli.topKSet), "top-k", "Top-k sampling cutoff")
+	root.PersistentFlags().Var(newTrackedFloatValue(&cli.minP, &cli.minPSet), "min-p", "Minimum token probability, relative to the most likely token")
 	root.PersistentFlags().Var(newTrackedFloatValue(&cli.presencePenalty, &cli.presencePenaltySet), "presence-penalty", "Presence penalty")
+	root.PersistentFlags().Var(newTrackedFloatValue(&cli.repetitionPenalty, &cli.repetitionPenaltySet), "repetition-penalty", "Repetition penalty (1.0 disables)")
 	root.PersistentFlags().StringVar(&cli.extraBody, "extra-body", "", "Additional JSON object fields to merge into the LLM request body")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.maxOutputTokens, &cli.maxOutputTokensSet), "max-output-tokens", "Maximum output (completion) tokens the model may generate; distinct from --max-context-tokens (input budget)")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.smallMaxTokens, &cli.smallMaxTokensSet), "small-max-output-tokens", "Maximum output (completion) tokens for workflow steps using model: \"@small\"")
@@ -359,7 +369,9 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().Var(newTrackedFloatValue(&cli.smallTemperature, &cli.smallTemperatureSet), "small-temperature", "Sampling temperature for workflow steps using model: \"@small\"")
 	root.PersistentFlags().Var(newTrackedFloatValue(&cli.smallTopP, &cli.smallTopPSet), "small-top-p", "Nucleus sampling probability for workflow steps using model: \"@small\"")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.smallTopK, &cli.smallTopKSet), "small-top-k", "Top-k sampling cutoff for workflow steps using model: \"@small\"")
+	root.PersistentFlags().Var(newTrackedFloatValue(&cli.smallMinP, &cli.smallMinPSet), "small-min-p", "Minimum token probability for workflow steps using model: \"@small\"")
 	root.PersistentFlags().Var(newTrackedFloatValue(&cli.smallPresencePenalty, &cli.smallPresencePenaltySet), "small-presence-penalty", "Presence penalty for workflow steps using model: \"@small\"")
+	root.PersistentFlags().Var(newTrackedFloatValue(&cli.smallRepetitionPenalty, &cli.smallRepetitionPenaltySet), "small-repetition-penalty", "Repetition penalty for workflow steps using model: \"@small\"")
 	root.PersistentFlags().StringVar(&cli.smallExtraBody, "small-extra-body", "", "Additional JSON object fields for workflow steps using model: \"@small\"")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.maxContextTokens, &cli.maxContextTokensSet), "max-context-tokens", "Context token budget")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.maxRequestBytes, &cli.maxRequestBytesSet), "max-request-bytes", "Maximum serialized LLM request size in bytes (0 disables)")
@@ -555,9 +567,17 @@ func (a *app) loadProfile() (string, config.Profile, error) {
 	if a.topKSet {
 		topK = &a.topK
 	}
+	var minP *float64
+	if a.minPSet {
+		minP = &a.minP
+	}
 	var presencePenalty *float64
 	if a.presencePenaltySet {
 		presencePenalty = &a.presencePenalty
+	}
+	var repetitionPenalty *float64
+	if a.repetitionPenaltySet {
+		repetitionPenalty = &a.repetitionPenalty
 	}
 	var maxTokens *int
 	if a.maxOutputTokensSet {
@@ -587,9 +607,17 @@ func (a *app) loadProfile() (string, config.Profile, error) {
 	if a.smallTopKSet {
 		smallTopK = &a.smallTopK
 	}
+	var smallMinP *float64
+	if a.smallMinPSet {
+		smallMinP = &a.smallMinP
+	}
 	var smallPresencePenalty *float64
 	if a.smallPresencePenaltySet {
 		smallPresencePenalty = &a.smallPresencePenalty
+	}
+	var smallRepetitionPenalty *float64
+	if a.smallRepetitionPenaltySet {
+		smallRepetitionPenalty = &a.smallRepetitionPenalty
 	}
 	var smallExtraBody map[string]any
 	if strings.TrimSpace(a.smallExtraBody) != "" {
@@ -626,16 +654,18 @@ func (a *app) loadProfile() (string, config.Profile, error) {
 		Profile: profileOverride,
 		Model:   a.model,
 		Small: config.SmallModelConfig{
-			Model:           a.smallModel,
-			BaseURL:         a.smallBaseURL,
-			APIKey:          a.smallAPIKey,
-			MaxTokens:       smallMaxTokens,
-			Temperature:     smallTemperature,
-			TopP:            smallTopP,
-			TopK:            smallTopK,
-			PresencePenalty: smallPresencePenalty,
-			ExtraBody:       smallExtraBody,
-			ReasoningEffort: a.smallReasoningEffort,
+			Model:             a.smallModel,
+			BaseURL:           a.smallBaseURL,
+			APIKey:            a.smallAPIKey,
+			MaxTokens:         smallMaxTokens,
+			Temperature:       smallTemperature,
+			TopP:              smallTopP,
+			TopK:              smallTopK,
+			MinP:              smallMinP,
+			PresencePenalty:   smallPresencePenalty,
+			RepetitionPenalty: smallRepetitionPenalty,
+			ExtraBody:         smallExtraBody,
+			ReasoningEffort:   a.smallReasoningEffort,
 		},
 		BaseURL:                   a.baseURL,
 		APIKey:                    a.apiKey,
@@ -643,7 +673,9 @@ func (a *app) loadProfile() (string, config.Profile, error) {
 		Temperature:               temperature,
 		TopP:                      topP,
 		TopK:                      topK,
+		MinP:                      minP,
 		PresencePenalty:           presencePenalty,
+		RepetitionPenalty:         repetitionPenalty,
 		ExtraBody:                 extraBody,
 		MaxTokens:                 maxTokens,
 		DisableJSONResponseFormat: a.disableJSONResponseFormat,
@@ -2248,18 +2280,25 @@ type modelCheckProfile struct {
 	PresencePenalty *float64
 	ExtraBody       map[string]any
 	ReasoningEffort string
+	// Fields added after the fingerprint shipped carry omitempty so a profile
+	// that leaves them unset keeps hashing exactly as before, instead of
+	// invalidating every stored capability entry.
+	MinP              *float64 `json:",omitempty"`
+	RepetitionPenalty *float64 `json:",omitempty"`
 }
 
 func modelCheckProfileSignature(profile config.Profile) modelCheckProfile {
 	return modelCheckProfile{
-		Model:           strings.TrimSpace(profile.Model),
-		MaxTokens:       profile.MaxTokens,
-		Temperature:     profile.Temperature,
-		TopP:            profile.TopP,
-		TopK:            profile.TopK,
-		PresencePenalty: profile.PresencePenalty,
-		ExtraBody:       profile.ExtraBody,
-		ReasoningEffort: profile.ReasoningEffort,
+		Model:             strings.TrimSpace(profile.Model),
+		MaxTokens:         profile.MaxTokens,
+		Temperature:       profile.Temperature,
+		TopP:              profile.TopP,
+		TopK:              profile.TopK,
+		PresencePenalty:   profile.PresencePenalty,
+		ExtraBody:         profile.ExtraBody,
+		ReasoningEffort:   profile.ReasoningEffort,
+		MinP:              profile.MinP,
+		RepetitionPenalty: profile.RepetitionPenalty,
 	}
 }
 
@@ -3221,8 +3260,14 @@ func modelSummary(profile config.Profile, req model.ReviewRequest) string {
 	if profile.TopK != nil {
 		flags = append(flags, fmt.Sprintf("top_k=%d", *profile.TopK))
 	}
+	if profile.MinP != nil {
+		flags = append(flags, fmt.Sprintf("min_p=%g", *profile.MinP))
+	}
 	if profile.PresencePenalty != nil {
 		flags = append(flags, fmt.Sprintf("presence_penalty=%g", *profile.PresencePenalty))
+	}
+	if profile.RepetitionPenalty != nil {
+		flags = append(flags, fmt.Sprintf("repetition_penalty=%g", *profile.RepetitionPenalty))
 	}
 	flags = append(flags, formatExtraBody(profile.ExtraBody)...)
 	return strings.Join(flags, ", ")

@@ -295,16 +295,22 @@ func TestClientReviewIncludesSamplingFieldsAndExtraBody(t *testing.T) {
 	client := NewOpenAIClient(server.URL, "token", "model")
 	topP := 0.9
 	topK := 40
+	minP := 0.05
 	presencePenalty := 0.1
+	repetitionPenalty := 1.1
 	_, err := client.Review(context.Background(), &ReviewRequest{
-		SystemPrompt:    "system",
-		UserContent:     "user",
-		TopP:            &topP,
-		TopK:            &topK,
-		PresencePenalty: &presencePenalty,
+		SystemPrompt:      "system",
+		UserContent:       "user",
+		TopP:              &topP,
+		TopK:              &topK,
+		MinP:              &minP,
+		PresencePenalty:   &presencePenalty,
+		RepetitionPenalty: &repetitionPenalty,
 		ExtraBody: map[string]any{
-			"top_k":            20,
-			"presence_penalty": 0.5,
+			"top_k":              20,
+			"min_p":              0.5,
+			"presence_penalty":   0.5,
+			"repetition_penalty": 2.0,
 			"chat_template_kwargs": map[string]any{
 				"enable_thinking": true,
 				"clear_thinking":  false,
@@ -320,8 +326,14 @@ func TestClientReviewIncludesSamplingFieldsAndExtraBody(t *testing.T) {
 	if got := payload["top_k"]; got != float64(40) {
 		t.Fatalf("top_k = %v", got)
 	}
+	if got := payload["min_p"]; got != 0.05 {
+		t.Fatalf("min_p = %v", got)
+	}
 	if got := payload["presence_penalty"]; got != 0.1 {
 		t.Fatalf("presence_penalty = %v", got)
+	}
+	if got := payload["repetition_penalty"]; got != 1.1 {
+		t.Fatalf("repetition_penalty = %v", got)
 	}
 	chatTemplateKwargs, ok := payload["chat_template_kwargs"].(map[string]any)
 	if !ok {

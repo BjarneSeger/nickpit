@@ -45,8 +45,14 @@ func mergeProfiles(base, override Profile) Profile {
 	if override.TopK != nil {
 		base.TopK = override.TopK
 	}
+	if override.MinP != nil {
+		base.MinP = override.MinP
+	}
 	if override.PresencePenalty != nil {
 		base.PresencePenalty = override.PresencePenalty
+	}
+	if override.RepetitionPenalty != nil {
+		base.RepetitionPenalty = override.RepetitionPenalty
 	}
 	if override.ExtraBody != nil {
 		base.ExtraBody = override.ExtraBody

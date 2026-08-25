@@ -145,7 +145,9 @@ type ReviewRequest struct {
 	Temperature                    *float64
 	TopP                           *float64
 	TopK                           *int
+	MinP                           *float64
 	PresencePenalty                *float64
+	RepetitionPenalty              *float64
 	ExtraBody                      map[string]any
 	ParallelToolCalls              bool
 	ReasoningEffort                string
@@ -810,9 +812,17 @@ func cloneReviewRequest(req *ReviewRequest) ReviewRequest {
 		topK := *req.TopK
 		cloned.TopK = &topK
 	}
+	if req.MinP != nil {
+		minP := *req.MinP
+		cloned.MinP = &minP
+	}
 	if req.PresencePenalty != nil {
 		presencePenalty := *req.PresencePenalty
 		cloned.PresencePenalty = &presencePenalty
+	}
+	if req.RepetitionPenalty != nil {
+		repetitionPenalty := *req.RepetitionPenalty
+		cloned.RepetitionPenalty = &repetitionPenalty
 	}
 	return cloned
 }
@@ -1439,11 +1449,23 @@ func (c *OpenAIClient) reviewOnce(ctx context.Context, req *ReviewRequest, progr
 		requestExtraBody = setRequestExtraBodyField(requestExtraBody, "top_k", *req.TopK)
 		topKLog = fmt.Sprintf("%d", *req.TopK)
 	}
+	minPLog := "unset"
+	if req.MinP != nil {
+		// min_p has no field on the OpenAI request type, so it rides in
+		// extra_body like top_k.
+		requestExtraBody = setRequestExtraBodyField(requestExtraBody, "min_p", *req.MinP)
+		minPLog = fmt.Sprintf("%.2f", *req.MinP)
+	}
 	presencePenaltyLog := "unset"
 	if req.PresencePenalty != nil {
 		payload.PresencePenalty = float32(*req.PresencePenalty)
 		requestExtraBody = setRequestExtraBodyField(requestExtraBody, "presence_penalty", *req.PresencePenalty)
 		presencePenaltyLog = fmt.Sprintf("%.2f", *req.PresencePenalty)
+	}
+	repetitionPenaltyLog := "unset"
+	if req.RepetitionPenalty != nil {
+		requestExtraBody = setRequestExtraBodyField(requestExtraBody, "repetition_penalty", *req.RepetitionPenalty)
+		repetitionPenaltyLog = fmt.Sprintf("%.2f", *req.RepetitionPenalty)
 	}
 	extraBodyLog := "unset"
 	if len(requestExtraBody) > 0 {
@@ -1499,14 +1521,16 @@ func (c *OpenAIClient) reviewOnce(ctx context.Context, req *ReviewRequest, progr
 	}
 
 	c.logf(ctx,
-		"LLM request prepared: model=%s endpoint=%s max_tokens=%s temperature=%s top_p=%s top_k=%s presence_penalty=%s extra_body_fields=%s reasoning_effort=%s stream=%t messages=%d tools=%d",
+		"LLM request prepared: model=%s endpoint=%s max_tokens=%s temperature=%s top_p=%s top_k=%s min_p=%s presence_penalty=%s repetition_penalty=%s extra_body_fields=%s reasoning_effort=%s stream=%t messages=%d tools=%d",
 		payload.Model,
 		c.baseURL+"/chat/completions",
 		maxTokensLog,
 		temperatureLog,
 		topPLog,
 		topKLog,
+		minPLog,
 		presencePenaltyLog,
+		repetitionPenaltyLog,
 		extraBodyLog,
 		payload.ReasoningEffort,
 		true,
