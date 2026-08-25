@@ -153,12 +153,18 @@ type ReviewRequest struct {
 	ReasoningSink                  ReasoningSink
 	DisableReasoningEffortFallback bool
 	Urgent                         bool
-	// CallerRetriesOnError tells Review that the caller wraps it in a retry
-	// loop over every error it returns, so the failure half of Review's retry
-	// outcome is the caller's to report: a warning here would announce failures
-	// the caller goes on to recover from as if the run had gone wrong. Recovery
-	// inside the call is still reported, since nothing else knows about it.
-	CallerRetriesOnError bool
+	// CallerRetriesError reports, for an error Review is about to return,
+	// whether the caller's own retry loop will retry it. Those failures are the
+	// caller's to report — a warning here would announce a failure the caller
+	// goes on to recover from as if the run had gone wrong — while every error
+	// the caller will not retry stays Review's to report, so no exit is left
+	// unexplained. Recovery inside the call is always reported, since nothing
+	// else knows about it. A nil predicate means the caller retries nothing.
+	//
+	// It takes the error rather than a flag because a caller that retries only
+	// some errors would otherwise silence the rest: the ones it hands straight
+	// back are exactly the ones nothing else would report.
+	CallerRetriesError func(error) bool
 }
 
 type Message struct {
@@ -897,7 +903,7 @@ func (c *OpenAIClient) Review(ctx context.Context, req *ReviewRequest) (*ReviewR
 	// failure the user needs to see, and a failure after the stream closed is.
 	var progress retryProgress
 	resp, err := c.reviewLadder(ctx, req, &progress)
-	c.logRetryOutcome(ctx, &progress, err, req.CallerRetriesOnError)
+	c.logRetryOutcome(ctx, &progress, err, req.CallerRetriesError)
 	return resp, err
 }
 
@@ -1838,7 +1844,7 @@ func (c *OpenAIClient) reviewStream(ctx context.Context, payload openai.ChatComp
 					}
 				}
 				if !c.shouldRetryHTTPStatus(status, retries) {
-					progress.recordFailure(fmt.Sprintf("status=%d", status))
+					progress.recordFailure(httpFailureReason(status, statusErr.message))
 					return nil, statusErr
 				}
 				resp := responseFromCapture(capture)
@@ -1862,11 +1868,13 @@ func (c *OpenAIClient) reviewStream(ctx context.Context, payload openai.ChatComp
 						return nil, fmt.Errorf("llm: rate limit wait budget of %s exhausted after waiting %s: %w", budget, retries.waited, statusErr)
 					}
 					retries.rateLimit++
-					// Rendered before waitFor joins the spent budget, so the
-					// "(waited X/Y)" gauge reports the wait that is over rather
-					// than the one that is about to start.
-					retryLine = c.retryHTTPStatusLine(progress.recordRetry(), status, retries, waitFor)
+					// Rendered after waitFor joins the spent budget, so the
+					// "(waited X/Y)" gauge counts the wait the line itself
+					// announces. Rendering it before left the last gauge a full
+					// backoff short of what had been waited, which is precisely
+					// the number the give-up above points back at.
 					retries.waited += waitFor
+					retryLine = c.retryHTTPStatusLine(progress.recordRetry(), status, retries, waitFor)
 				} else {
 					retries.bounded++
 					retryLine = c.retryHTTPStatusLine(progress.recordRetry(), status, retries, waitFor)
@@ -2040,9 +2048,9 @@ func (c *OpenAIClient) rateLimitWaitBounded() bool {
 // retryHTTPStatusLine renders the retry line for a retryable HTTP status. retry
 // is the call's own retry total, which spans every budget, so the budget that
 // bounds this one retry is named in the trailing gauge: 429s carry how much of
-// the rate-limit wait is gone (or their count when that cap is disabled), and
-// every other status carries the count shouldRetryHTTPStatus gates on
-// MaxRetries.
+// the rate-limit wait is gone once the wait this line announces is over (or
+// their count when that cap is disabled), and every other status carries the
+// count shouldRetryHTTPStatus gates on MaxRetries.
 func (c *OpenAIClient) retryHTTPStatusLine(retry, status int, retries requestRetries, waitFor time.Duration) string {
 	if status == http.StatusTooManyRequests {
 		gauge := model.RetryBudget(retries.rateLimit, c.retrier.MaxRetries, "rate-limit retries")
@@ -2052,6 +2060,19 @@ func (c *OpenAIClient) retryHTTPStatusLine(retry, status int, retries requestRet
 		return model.RetryBudgetLine(retry, "rate limited (429)", waitFor, gauge)
 	}
 	return model.RetryBudgetLine(retry, fmt.Sprintf("status=%d", status), waitFor, model.RetryBudget(retries.bounded, c.retrier.MaxRetries, "request retries"))
+}
+
+// httpFailureReason renders the failure a status that will not be retried ends
+// the call with. The number alone explains nothing about a 400 or a 404 — the
+// provider's own message is the only thing that does, and it is the one class
+// of failure that will never self-heal, so it is inlined; ClipLine keeps a
+// multi-line or control-character-carrying body from breaking the line.
+func httpFailureReason(status int, message string) string {
+	reason := fmt.Sprintf("status=%d", status)
+	if msg := model.ClipLine(message, 100); msg != "" {
+		reason += ": " + msg
+	}
+	return reason
 }
 
 // logRetryOutcome closes out one Review call with exactly one line: recovery
@@ -2069,11 +2090,11 @@ func (c *OpenAIClient) retryHTTPStatusLine(retry, status int, retries requestRet
 // reports a failed run, while this line only explains a lane that went quiet.
 // Deliberate cancellation (Ctrl-C, an expired lane time budget) is not a model
 // failure at all and stays silent, and neither is an invalid response or a
-// failure a caller that set CallerRetriesOnError is about to retry.
+// failure the caller's own retry loop is about to retry.
 //
 // A nil progress reports nothing, the way recordRetry and recordFailure record
 // nothing, so tracking retries stays optional for a caller of reviewLadder.
-func (c *OpenAIClient) logRetryOutcome(ctx context.Context, progress *retryProgress, err error, callerRetries bool) {
+func (c *OpenAIClient) logRetryOutcome(ctx context.Context, progress *retryProgress, err error, callerRetries func(error) bool) {
 	if progress == nil {
 		return
 	}
@@ -2086,10 +2107,18 @@ func (c *OpenAIClient) logRetryOutcome(ctx context.Context, progress *retryProgr
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
-	// The caller retries every error this call returns and reports the outcome
-	// of its own loop, so warning here would announce a failure it is about to
-	// recover from.
-	if callerRetries {
+	// A request context that is already done means the call was cut short on
+	// purpose — Ctrl-C, or a caller's soft deadline that expires mid-stream to
+	// re-issue the request urgently — and the transport error a severed stream
+	// surfaces (an aborted read, an unexpected EOF) rarely carries the context
+	// cause the check above matches on. Without this, a lane that recovers on
+	// the very next call is announced as a model failure.
+	if ctx.Err() != nil {
+		return
+	}
+	// The caller retries this error and reports the outcome of its own loop, so
+	// warning here would announce a failure it is about to recover from.
+	if callerRetries != nil && callerRetries(err) {
 		return
 	}
 	// An unparseable or incomplete response is returned to the caller for its

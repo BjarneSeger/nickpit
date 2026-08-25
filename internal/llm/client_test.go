@@ -405,11 +405,12 @@ func TestClientReviewRetries429WithProgressLoggingUntilSuccess(t *testing.T) {
 		t.Fatalf("attempts = %d", attempts)
 	}
 	got := logs.String()
-	// The gauge reports the wait already spent, so the first retry has none.
-	if want := "Model      retry 1 rate limited (429), waiting 1ms (waited 0s/10m0s)"; !strings.Contains(got, want) {
+	// The gauge counts the wait the line itself announces, so the budget it
+	// reports is the one that will have been spent once the retry starts.
+	if want := "Model      retry 1 rate limited (429), waiting 1ms (waited 1ms/10m0s)"; !strings.Contains(got, want) {
 		t.Fatalf("missing first retry progress log %q in:\n%s", want, got)
 	}
-	if want := "Model      retry 2 rate limited (429), waiting 1ms (waited 1ms/10m0s)"; !strings.Contains(got, want) {
+	if want := "Model      retry 2 rate limited (429), waiting 1ms (waited 2ms/10m0s)"; !strings.Contains(got, want) {
 		t.Fatalf("missing second retry progress log %q in:\n%s", want, got)
 	}
 	if want := "Model      ok recovered after 2 retries"; !strings.Contains(got, want) {
@@ -5743,7 +5744,7 @@ func TestClientReview429StopsWhenWaitCapAndRetriesAreBothDisabled(t *testing.T) 
 // A caller that retries every error Review returns reports the outcome of its own
 // loop, so the model layer must not warn about a failure that caller is about to
 // recover from.
-func TestClientReviewCallerRetriesOnErrorSuppressesFailureLine(t *testing.T) {
+func TestClientReviewCallerRetriedErrorSuppressesFailureLine(t *testing.T) {
 	var attempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts++
@@ -5769,7 +5770,7 @@ func TestClientReviewCallerRetriesOnErrorSuppressesFailureLine(t *testing.T) {
 		UserContent:                    "user",
 		ReasoningEffort:                "high",
 		DisableReasoningEffortFallback: true,
-		CallerRetriesOnError:           true,
+		CallerRetriesError:             func(error) bool { return true },
 	}); err == nil {
 		t.Fatal("expected the exhausted reasoning budget to fail the call")
 	}
@@ -5786,7 +5787,7 @@ func TestClientReviewCallerRetriesOnErrorSuppressesFailureLine(t *testing.T) {
 
 // Recovery inside the call has no other reporter, so the caller's own retry loop
 // does not silence it.
-func TestClientReviewCallerRetriesOnErrorStillReportsRecovery(t *testing.T) {
+func TestClientReviewCallerRetriedErrorStillReportsRecovery(t *testing.T) {
 	var attempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts++
@@ -5808,9 +5809,9 @@ func TestClientReviewCallerRetriesOnErrorStillReportsRecovery(t *testing.T) {
 	client.SetLogger(logger)
 
 	if _, err := client.Review(context.Background(), &ReviewRequest{
-		SystemPrompt:         "system",
-		UserContent:          "user",
-		CallerRetriesOnError: true,
+		SystemPrompt:       "system",
+		UserContent:        "user",
+		CallerRetriesError: func(error) bool { return true },
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -5828,7 +5829,7 @@ func TestLogRetryOutcomeWithNilProgressReportsNothing(t *testing.T) {
 	logger.SetShowProgress(true)
 	client.SetLogger(logger)
 
-	client.logRetryOutcome(context.Background(), nil, errors.New("boom"), false)
+	client.logRetryOutcome(context.Background(), nil, errors.New("boom"), nil)
 	if got := logs.String(); got != "" {
 		t.Fatalf("nil progress logged %q", got)
 	}
@@ -5836,7 +5837,8 @@ func TestLogRetryOutcomeWithNilProgressReportsNothing(t *testing.T) {
 
 // The give-up line must not claim the whole wait budget went by: the loop stops
 // because the next wait would not fit in what is left, while the gauge on the
-// line right above is still under the budget.
+// line right above reports what was actually waited — every wait the retry
+// lines announced, and no more.
 func TestClientReview429GiveUpAgreesWithTheWaitGauge(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Provider returned error: rate limited", http.StatusTooManyRequests)
@@ -5862,7 +5864,8 @@ func TestClientReview429GiveUpAgreesWithTheWaitGauge(t *testing.T) {
 	}
 	got := logs.String()
 	for _, want := range []string{
-		"Model      retry 2 rate limited (429), waiting 10ms (waited 10ms/25ms)",
+		"Model      retry 1 rate limited (429), waiting 10ms (waited 10ms/25ms)",
+		"Model      retry 2 rate limited (429), waiting 10ms (waited 20ms/25ms)",
 		"Model      warn rate limited (429), no retry left within the 25ms wait budget after 2 retries",
 	} {
 		if !strings.Contains(got, want) {
@@ -5871,5 +5874,79 @@ func TestClientReview429GiveUpAgreesWithTheWaitGauge(t *testing.T) {
 	}
 	if strings.Contains(got, "for over") {
 		t.Fatalf("give-up line claimed the budget was spent in:\n%s", got)
+	}
+}
+
+// A caller that retries only some errors must not silence the rest: the ones it
+// hands straight back are exactly the ones nothing else would report.
+func TestLogRetryOutcomeReportsErrorsThePredicateDeclines(t *testing.T) {
+	client := NewOpenAIClient("http://example.invalid", "token", "model")
+	var logs bytes.Buffer
+	logger := logging.New(&logs, false, false)
+	logger.SetShowProgress(true)
+	client.SetLogger(logger)
+
+	progress := retryProgress{failure: "network error"}
+	retriesReasoningLoops := func(err error) bool {
+		var loopErr *ReasoningLoopDetectedError
+		return errors.As(err, &loopErr)
+	}
+	client.logRetryOutcome(context.Background(), &progress, errors.New("boom"), retriesReasoningLoops)
+	if want := "Model      warn network error"; !strings.Contains(logs.String(), want) {
+		t.Fatalf("missing %q in:\n%s", want, logs.String())
+	}
+
+	logs.Reset()
+	client.logRetryOutcome(context.Background(), &progress, &ReasoningLoopDetectedError{ReasoningEffort: "high"}, retriesReasoningLoops)
+	if got := logs.String(); got != "" {
+		t.Fatalf("failure the caller retries was warned about: %q", got)
+	}
+}
+
+// A request context that is already done means the call was cut short on
+// purpose, and the transport error a severed stream surfaces rarely carries the
+// context cause. Warning would announce a model failure for a lane that is
+// about to re-issue the request and succeed.
+func TestLogRetryOutcomeStaysSilentWhenTheRequestContextIsDone(t *testing.T) {
+	client := NewOpenAIClient("http://example.invalid", "token", "model")
+	var logs bytes.Buffer
+	logger := logging.New(&logs, false, false)
+	logger.SetShowProgress(true)
+	client.SetLogger(logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	progress := retryProgress{failure: "stream error"}
+	client.logRetryOutcome(ctx, &progress, errors.New("unexpected EOF"), nil)
+	if got := logs.String(); got != "" {
+		t.Fatalf("deliberately cut-short call logged %q", got)
+	}
+}
+
+// A status that will never be retried is the one failure the number alone
+// explains nothing about, so the provider's own message rides along.
+func TestClientReviewNonRetryableStatusReportsTheProviderMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "model \"x\" does not support tools", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewOpenAIClient(server.URL, "token", "model")
+	var logs bytes.Buffer
+	logger := logging.New(&logs, false, false)
+	logger.SetShowProgress(true)
+	client.SetLogger(logger)
+
+	if _, err := client.Review(context.Background(), &ReviewRequest{
+		SystemPrompt: "system",
+		UserContent:  "user",
+	}); err == nil {
+		t.Fatal("expected the 400 to fail the call")
+	}
+	got := logs.String()
+	for _, want := range []string{"Model      warn status=400", "does not support tools"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
 	}
 }

@@ -487,15 +487,17 @@ func (e *Engine) reviewWithoutTools(ctx context.Context, llmReq *llm.ReviewReque
 			// The model layer hands invalid responses back without calling them a
 			// failure because this loop is what recovers from them, so the lane
 			// would otherwise end on "retry N/max invalid JSON" and go silent.
-			e.logf(ctx, "Output retries exhausted in no-tools call: retries=%d reason=%q", attempt, invalidResp.Reason)
-			e.logProgress(logging.StageModel, logging.StateWarn, outputRetriesExhaustedLine(attempt, "invalid JSON"))
+			// Through the shared helper: it is the same event as the agent
+			// loop's, so it belongs on the same agents' progress streams and
+			// carries the same ctx identity rather than an anonymous line.
+			e.logOutputRetriesExhausted(ctx, loopReq, state, attempt, fmt.Sprintf("invalid JSON in no-tools call: reason=%q missing=%v", invalidResp.Reason, invalidResp.MissingFields), "invalid JSON")
 			return nil, err
 		}
 		if invalidResp.ReasoningEffort != "" {
 			llmReq.ReasoningEffort = invalidResp.ReasoningEffort
 		}
 		e.logf(ctx, "Invalid JSON response in no-tools call, retrying: attempt=%d reason=%q missing=%v", attempt+1, invalidResp.Reason, invalidResp.MissingFields)
-		e.logProgress(logging.StageModel, logging.StateRetry, model.RetryLine(attempt+1, maxOutputRetries, "invalid JSON", 0))
+		e.logOutputRetryProgress(ctx, loopReq, attempt+1, maxOutputRetries, "invalid JSON")
 		if strings.TrimSpace(invalidResp.RawContent) != "" {
 			llmReq.Messages = append(llmReq.Messages, llm.Message{Role: "assistant", Content: invalidResp.RawContent})
 		} else {

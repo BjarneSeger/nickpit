@@ -877,8 +877,75 @@ func TestBaseRequestLetsTheCheckerReportRetriedFailures(t *testing.T) {
 		{probeRetryReviewLike, false},
 	} {
 		req := checker.baseRequest("high", nil, nil, tc.mode)
-		if req.CallerRetriesOnError != tc.want {
-			t.Fatalf("mode %d: CallerRetriesOnError = %v, want %v", tc.mode, req.CallerRetriesOnError, tc.want)
+		if got := req.CallerRetriesError != nil; got != tc.want {
+			t.Fatalf("mode %d: CallerRetriesError set = %v, want %v", tc.mode, got, tc.want)
 		}
+	}
+}
+
+// The model layer stays silent about the errors this loop retries, so when the
+// loop runs out the probe's last word would be "retry N/max" with nothing
+// saying the retries ran out.
+func TestReviewProbeWithModeLogsGiveUpWhenRetriesRunOut(t *testing.T) {
+	client := &scriptedClient{responses: []scriptedResponse{
+		{err: errors.New("boom 1")},
+		{err: errors.New("boom 2")},
+		{err: errors.New("boom 3")},
+	}}
+	checker := New(client, config.Profile{Model: "model", ReasoningEffort: "high", MaxOutputRetries: 2, MaxOutputRetriesConfigured: true})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	checker.SetLogger(logger)
+
+	probe := ProbeResult{Name: "configured_json_schema", ReasoningEffort: "high"}
+	req := checker.baseRequest("high", nil, nil, probeRetryAnyError)
+	if _, err := checker.reviewProbeWithMode(context.Background(), req, nil, probe, probeRetryAnyError); err == nil {
+		t.Fatal("expected the exhausted retries to fail the probe")
+	}
+	got := progress.String()
+	for _, want := range []string{"retry 1/2 boom 1", "retry 2/2 boom 2", "warn boom 3 after 2 retries"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+// An error this loop does not retry is reported by the model layer, which the
+// request's CallerRetriesError leaves free to do exactly for those errors, and
+// by the probe result line. A third line here would say it twice.
+func TestReviewProbeWithModeLeavesUnretriedErrorsToTheModelLayer(t *testing.T) {
+	client := &scriptedClient{responses: []scriptedResponse{{err: context.Canceled}}}
+	checker := New(client, config.Profile{Model: "model", ReasoningEffort: "high", MaxOutputRetries: 2, MaxOutputRetriesConfigured: true})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	checker.SetLogger(logger)
+
+	probe := ProbeResult{Name: "configured_json_schema", ReasoningEffort: "high"}
+	req := checker.baseRequest("high", nil, nil, probeRetryAnyError)
+	if _, err := checker.reviewProbeWithMode(context.Background(), req, nil, probe, probeRetryAnyError); err == nil {
+		t.Fatal("expected the canceled probe to fail")
+	}
+	if got := progress.String(); strings.Contains(got, "warn") || strings.Contains(got, "retry") {
+		t.Fatalf("unretried error logged a retry or give-up line in:\n%s", got)
+	}
+	if req.CallerRetriesError == nil || req.CallerRetriesError(context.Canceled) {
+		t.Fatal("CallerRetriesError promised a retry the probe loop does not make")
+	}
+}
+
+// MaxOutputRetries is unlimited at zero wherever it bounds a review lane, and
+// reading it as "no retries at all" here left a configured zero retrying
+// forever in one place and not at all in another. The model check bounds it
+// instead of taking the zero literally.
+func TestProbeOutputRetriesBoundsAnUnlimitedBudget(t *testing.T) {
+	unlimited := New(&scriptedClient{}, config.Profile{Model: "model", MaxOutputRetries: 0, MaxOutputRetriesConfigured: true})
+	if got := unlimited.probeOutputRetries(); got != config.DefaultMaxOutputRetries {
+		t.Fatalf("probeOutputRetries() = %d, want the default budget %d", got, config.DefaultMaxOutputRetries)
+	}
+	configured := New(&scriptedClient{}, config.Profile{Model: "model", MaxOutputRetries: 3, MaxOutputRetriesConfigured: true})
+	if got := configured.probeOutputRetries(); got != 3 {
+		t.Fatalf("probeOutputRetries() = %d, want 3", got)
 	}
 }

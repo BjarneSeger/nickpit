@@ -70,3 +70,12 @@ func RetryBudget(spent, limit int, name string) string {
 	}
 	return fmt.Sprintf("%d/%d %s", spent, limit, name)
 }
+
+// RetriesRemaining reports whether a retry loop that has already made `used`
+// retries may make another. A limit of zero or less is unlimited, the meaning
+// every configured retry limit carries; keeping the reading in one place is
+// what stops one loop from treating a configured zero as "no retries at all"
+// while its neighbours retry forever.
+func RetriesRemaining(used, limit int) bool {
+	return limit <= 0 || used < limit
+}

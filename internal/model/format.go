@@ -90,6 +90,12 @@ func ClipLine(text string, limit int) string {
 	if limit <= 0 {
 		return clipped
 	}
+	// A rune count never exceeds the byte length, so a string that already fits
+	// in bytes needs no conversion — which is every short title and nearly every
+	// error text, on a function called once per finding and once per failure.
+	if len(clipped) <= limit {
+		return clipped
+	}
 	runes := []rune(clipped)
 	if len(runes) <= limit {
 		return clipped
