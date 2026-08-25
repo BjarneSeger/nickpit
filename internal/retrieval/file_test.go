@@ -946,6 +946,50 @@ func TestLocalEngineKeepsLinkTargetBytesExact(t *testing.T) {
 	}
 }
 
+// A broken symlink is exactly the one worth reviewing, and a code-location repair
+// has to be able to read it. Stat resolves the link and fails with ENOENT, so the
+// link has to be recognized before it.
+func TestLocalEngineSearchesBrokenSymlinks(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "../missing/target.txt"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	found, err := engine.FindLines(context.Background(), repoRoot, "link", target)
+	if err != nil {
+		t.Fatalf("find_lines on a broken link: %v", err)
+	}
+	if found.MatchCount != 1 || found.Matches[0].CodeLocation.FilePath != "link" {
+		t.Fatalf("matches = %#v, want the link's own target", found.Matches)
+	}
+	results, err := engine.Search(context.Background(), repoRoot, "link", "missing", 0, 10, false)
+	if err != nil {
+		t.Fatalf("search on a broken link: %v", err)
+	}
+	if results.ResultCount != 1 {
+		t.Fatalf("results = %#v, want the target line", results.Results)
+	}
+	// A link to a directory is one entry too, not a walk of the target tree.
+	if err := os.Mkdir(filepath.Join(repoRoot, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "real", "f.txt"), []byte("needle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(repoRoot, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	walked, err := engine.Search(context.Background(), repoRoot, "dirlink", "needle", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walked.ResultCount != 0 {
+		t.Fatalf("a directory link was walked: %#v", walked.Results)
+	}
+}
+
 // A lone carriage return is a legal byte in a pathname and git counts blob lines
 // on LF alone, so a target holding one is ONE line whose bytes stay untouched.
 // Folding it would invent a second line and rename the target.

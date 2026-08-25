@@ -350,8 +350,13 @@ func TestDeletedFileModesReadsThePreImageMode(t *testing.T) {
 	}
 	// The pathspecs stay literal, and the commits stay on the other side of "--".
 	sep := slices.Index(args, "--")
-	if sep < 0 || !slices.Contains(args[sep+1:], ":(literal)dir/link") {
+	// Anchored at the top level: git log has no --full-tree, so an unanchored
+	// pathspec would be resolved against the runner's working directory.
+	if sep < 0 || !slices.Contains(args[sep+1:], ":(top,literal)dir/link") {
 		t.Fatalf("pathspecs = %v", args)
+	}
+	if !slices.Contains(args, "--no-relative") {
+		t.Fatalf("reported paths are not pinned to the repo root: %v", args)
 	}
 	if slices.Contains(args[sep+1:], "c1") {
 		t.Fatalf("a commit leaked into the pathspecs: %v", args)

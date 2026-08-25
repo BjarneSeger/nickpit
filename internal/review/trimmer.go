@@ -85,7 +85,45 @@ func (t *Trimmer) Trim(ctx *model.ReviewContext) (*model.ReviewContext, error) {
 	t.trimSupplemental(cloned)
 	t.trimCommits(cloned)
 	t.trimDiff(cloned)
+	t.trimSymlinkTargets(cloned)
 	return cloned, nil
+}
+
+// trimSymlinkTargets sheds attached link targets, last of all. A target is the
+// entire content of a hunk-less symlink change, so it is worth more than any
+// truncation the steps above perform — it goes only when the diff has already been
+// trimmed and the context is still over budget. Largest first, so the fewest
+// entries lose theirs. An entry that loses its target also loses the scope
+// metadataOnlySymlinkLocations grants on that evidence, which is correct: the
+// prompt no longer carries anything to ground a finding on.
+func (t *Trimmer) trimSymlinkTargets(ctx *model.ReviewContext) {
+	order := make([]int, 0, len(ctx.ChangedFiles))
+	for i, file := range ctx.ChangedFiles {
+		if file.SymlinkTarget != "" {
+			order = append(order, i)
+		}
+	}
+	if len(order) == 0 {
+		return
+	}
+	tracker := t.newTracker(ctx)
+	if !tracker.over() {
+		return
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return len(ctx.ChangedFiles[order[a]].SymlinkTarget) > len(ctx.ChangedFiles[order[b]].SymlinkTarget)
+	})
+	droppedBytes := map[string]int{}
+	for _, index := range order {
+		if !tracker.over() {
+			break
+		}
+		file := &ctx.ChangedFiles[index]
+		tracker.evicted(len(file.SymlinkTarget))
+		droppedBytes[file.Path] += len(file.SymlinkTarget)
+		file.SymlinkTarget = ""
+	}
+	appendEvictionOmission(ctx, "symlink targets omitted to fit context budget", droppedBytes)
 }
 
 // budgetTracker keeps eviction loops honest without re-rendering the whole
@@ -463,6 +501,11 @@ func renderContextText(ctx *model.ReviewContext) string {
 	}
 	for _, file := range ctx.ChangedFiles {
 		b.WriteString(file.Path)
+		// A rename's old path and an attached link target are serialized with the
+		// entry, and a target runs to git.MaxSymlinkTargetBytes — counting only
+		// Path would let them spend the budget outside the accounting.
+		b.WriteString(file.OldPath)
+		b.WriteString(file.SymlinkTarget)
 	}
 	for _, commit := range ctx.Commits {
 		b.WriteString(commit.Message)

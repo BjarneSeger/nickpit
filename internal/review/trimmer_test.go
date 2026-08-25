@@ -222,6 +222,54 @@ func TestTrimmerDropsSupplementalBeforeFlatteningCommits(t *testing.T) {
 	}
 }
 
+// An attached link target is serialized with its entry and runs to
+// MaxSymlinkTargetBytes, so it has to be counted against the budget — and, once
+// the diff itself has been trimmed, shed rather than left to overrun it.
+func TestTrimmerCountsAndShedsSymlinkTargets(t *testing.T) {
+	build := func() *model.ReviewContext {
+		return &model.ReviewContext{
+			ChangedFiles: []model.ChangedFile{
+				{Path: "small", Status: model.FileRenamed, OldPath: "old/small", Symlink: true, SymlinkTarget: strings.Repeat("s", 20)},
+				{Path: "big", Status: model.FileRenamed, OldPath: "old/big", Symlink: true, SymlinkTarget: strings.Repeat("b", 200)},
+			},
+		}
+	}
+	// The targets and old paths ARE the context here, so a budget below their
+	// combined length can only be met by shedding them.
+	counted := len(renderContextText(build()))
+	if counted < 220 {
+		t.Fatalf("rendered context = %d bytes, want the targets counted", counted)
+	}
+
+	trimmed, err := NewTrimmer(counted-200, exactEstimator{}).Trim(build())
+	if err != nil {
+		t.Fatalf("Trim: %v", err)
+	}
+	if trimmed.ChangedFiles[1].SymlinkTarget != "" {
+		t.Fatalf("the largest target survived: %d bytes", len(trimmed.ChangedFiles[1].SymlinkTarget))
+	}
+	// Largest first: shedding the big one sufficed, so the small one stays.
+	if trimmed.ChangedFiles[0].SymlinkTarget == "" {
+		t.Fatal("the small target was shed although dropping the big one sufficed")
+	}
+	// The rename itself is still on record, and the omission is reported.
+	if trimmed.ChangedFiles[1].OldPath != "old/big" {
+		t.Fatalf("old path = %q, want the move kept", trimmed.ChangedFiles[1].OldPath)
+	}
+	if !strings.Contains(strings.Join(trimmed.OmittedSections, " "), "symlink targets omitted") {
+		t.Fatalf("omissions = %v", trimmed.OmittedSections)
+	}
+
+	// A context that fits keeps every target.
+	kept, err := NewTrimmer(counted+10, exactEstimator{}).Trim(build())
+	if err != nil {
+		t.Fatalf("Trim: %v", err)
+	}
+	if kept.ChangedFiles[0].SymlinkTarget == "" || kept.ChangedFiles[1].SymlinkTarget == "" {
+		t.Fatalf("targets shed while inside the budget: %#v", kept.ChangedFiles)
+	}
+}
+
 func TestTrimmerHeadroomReducesBudget(t *testing.T) {
 	build := func() *model.ReviewContext {
 		return &model.ReviewContext{

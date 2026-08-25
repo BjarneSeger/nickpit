@@ -23,6 +23,14 @@ func literalPathspec(path string) string {
 	return ":(literal)" + path
 }
 
+// topLiteralPathspec is literalPathspec anchored at the repo top level, for
+// commands that have no equivalent of ls-tree's --full-tree. Without "top" a
+// pathspec is resolved against the runner's working directory, so a checkout root
+// below the top level would match nothing and the change would come back unmarked.
+func topLiteralPathspec(path string) string {
+	return ":(top,literal)" + path
+}
+
 // SymlinkPathsAtRev asks git which of paths are stored as symlinks (mode 120000)
 // in rev's tree. The result maps each such path, as git reports it, to the object
 // name of its blob — a symlink's blob is its target, so that name is what makes
@@ -97,11 +105,14 @@ func DeletedFileModes(ctx context.Context, runner Runner, commits, paths []strin
 	for commitChunk := range slices.Chunk(commits, maxTreeQueryPaths) {
 		for pathChunk := range slices.Chunk(paths, maxTreeQueryPaths) {
 			args := make([]string, 0, 8+len(commitChunk)+len(pathChunk))
-			args = append(args, "log", "--no-walk", "--format=", "--raw", "-z", "--no-renames", "--diff-filter=D")
+			// --no-relative keeps the reported paths repo-root-relative: with
+			// diff.relative=true set in a user's config, a command run from a
+			// subdirectory would report "link" where the change says "sub/link".
+			args = append(args, "log", "--no-walk", "--format=", "--raw", "-z", "--no-relative", "--no-renames", "--diff-filter=D")
 			args = append(args, commitChunk...)
 			args = append(args, "--")
 			for _, path := range pathChunk {
-				args = append(args, literalPathspec(path))
+				args = append(args, topLiteralPathspec(path))
 			}
 			out, err := runner.Run(ctx, args...)
 			if err != nil {

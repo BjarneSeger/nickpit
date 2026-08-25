@@ -435,10 +435,6 @@ func walkRepoTextFiles(repoRoot, path string, visit func(relPath, content string
 	if err != nil {
 		return "", nil, err
 	}
-	info, err := os.Stat(fullPath)
-	if err != nil {
-		return normalizedPath, nil, err
-	}
 	ignores := repofs.NewIgnoreMatcher(repoRoot)
 
 	var truncatedFiles []string
@@ -463,6 +459,21 @@ func walkRepoTextFiles(repoRoot, path string, visit func(relPath, content string
 		return visit(relPath, normalizeText(string(data)))
 	}
 
+	// A symlink is one entry whose content is its target path (see readFileCapped),
+	// so it is neither followed nor walked. The check comes before Stat, which
+	// resolves the link and fails outright when the target does not exist — a
+	// broken link is exactly the one worth searching, and it is what a
+	// code-location repair has to be able to read.
+	if _, isLink := repofs.LinkTarget(repoRoot, fullPath); isLink {
+		if err := visitFile(normalizedPath, false); err != nil {
+			return normalizedPath, truncatedFiles, err
+		}
+		return normalizedPath, truncatedFiles, nil
+	}
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return normalizedPath, truncatedFiles, err
+	}
 	if !info.IsDir() {
 		if err := visitFile(normalizedPath, false); err != nil {
 			return normalizedPath, truncatedFiles, err
