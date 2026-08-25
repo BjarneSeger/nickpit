@@ -329,6 +329,28 @@ func TestCategorizeOverrideResolvesSmallModel(t *testing.T) {
 	}
 }
 
+func TestOverridesResolveMinPAndRepetitionPenalty(t *testing.T) {
+	minP := 0.05
+	repetitionPenalty := 1.1
+	base := config.Profile{Model: "primary"}
+
+	step, _ := (&StepOverride{MinP: &minP, RepetitionPenalty: &repetitionPenalty}).Resolve(base, model.ReviewRequest{})
+	if step.MinP == nil || *step.MinP != minP {
+		t.Fatalf("step min_p = %v, want %v", step.MinP, minP)
+	}
+	if step.RepetitionPenalty == nil || *step.RepetitionPenalty != repetitionPenalty {
+		t.Fatalf("step repetition_penalty = %v, want %v", step.RepetitionPenalty, repetitionPenalty)
+	}
+
+	agent, _ := (&AgentOverride{MinP: &minP, RepetitionPenalty: &repetitionPenalty}).Resolve(base, model.ReviewRequest{})
+	if agent.MinP == nil || *agent.MinP != minP {
+		t.Fatalf("agent min_p = %v, want %v", agent.MinP, minP)
+	}
+	if agent.RepetitionPenalty == nil || *agent.RepetitionPenalty != repetitionPenalty {
+		t.Fatalf("agent repetition_penalty = %v, want %v", agent.RepetitionPenalty, repetitionPenalty)
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	cases := map[string]string{
 		"unknown top key":                 "version: 1\nbogus: x\nsteps:\n  - type: merge\n",

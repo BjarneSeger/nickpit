@@ -209,21 +209,25 @@ profiles:
 	}
 
 	app := &app{
-		profile:                 "default",
-		configPath:              path,
-		smallModel:              "cli-small-model",
-		smallReasoningEffort:    "low",
-		smallMaxTokens:          2048,
-		smallMaxTokensSet:       true,
-		smallTemperature:        0.5,
-		smallTemperatureSet:     true,
-		smallTopP:               0.9,
-		smallTopPSet:            true,
-		smallTopK:               40,
-		smallTopKSet:            true,
-		smallPresencePenalty:    0.1,
-		smallPresencePenaltySet: true,
-		smallExtraBody:          `{"chat_template_kwargs":{"enable_thinking":true}}`,
+		profile:                   "default",
+		configPath:                path,
+		smallModel:                "cli-small-model",
+		smallReasoningEffort:      "low",
+		smallMaxTokens:            2048,
+		smallMaxTokensSet:         true,
+		smallTemperature:          0.5,
+		smallTemperatureSet:       true,
+		smallTopP:                 0.9,
+		smallTopPSet:              true,
+		smallTopK:                 40,
+		smallTopKSet:              true,
+		smallMinP:                 0.05,
+		smallMinPSet:              true,
+		smallPresencePenalty:      0.1,
+		smallPresencePenaltySet:   true,
+		smallRepetitionPenalty:    1.1,
+		smallRepetitionPenaltySet: true,
+		smallExtraBody:            `{"chat_template_kwargs":{"enable_thinking":true}}`,
 	}
 	_, profile, err := app.loadProfile()
 	if err != nil {
@@ -247,8 +251,14 @@ profiles:
 	if profile.Small.TopK == nil || *profile.Small.TopK != 40 {
 		t.Fatalf("small top_k = %v", profile.Small.TopK)
 	}
+	if profile.Small.MinP == nil || *profile.Small.MinP != 0.05 {
+		t.Fatalf("small min_p = %v", profile.Small.MinP)
+	}
 	if profile.Small.PresencePenalty == nil || *profile.Small.PresencePenalty != 0.1 {
 		t.Fatalf("small presence penalty = %v", profile.Small.PresencePenalty)
+	}
+	if profile.Small.RepetitionPenalty == nil || *profile.Small.RepetitionPenalty != 1.1 {
+		t.Fatalf("small repetition penalty = %v", profile.Small.RepetitionPenalty)
 	}
 	chatTemplateKwargs, ok := profile.Small.ExtraBody["chat_template_kwargs"].(map[string]any)
 	if !ok || chatTemplateKwargs["enable_thinking"] != true {
@@ -549,17 +559,21 @@ profiles:
 	}
 
 	app := &app{
-		profile:            "default",
-		configPath:         path,
-		temperature:        1,
-		temperatureSet:     true,
-		topP:               1,
-		topPSet:            true,
-		topK:               40,
-		topKSet:            true,
-		presencePenalty:    0.1,
-		presencePenaltySet: true,
-		extraBody:          `{"chat_template_kwargs":{"enable_thinking":true,"clear_thinking":false}}`,
+		profile:              "default",
+		configPath:           path,
+		temperature:          1,
+		temperatureSet:       true,
+		topP:                 1,
+		topPSet:              true,
+		topK:                 40,
+		topKSet:              true,
+		minP:                 0.05,
+		minPSet:              true,
+		presencePenalty:      0.1,
+		presencePenaltySet:   true,
+		repetitionPenalty:    1.1,
+		repetitionPenaltySet: true,
+		extraBody:            `{"chat_template_kwargs":{"enable_thinking":true,"clear_thinking":false}}`,
 	}
 	_, profile, err := app.loadProfile()
 	if err != nil {
@@ -580,8 +594,14 @@ profiles:
 	if profile.TopK == nil || *profile.TopK != 40 {
 		t.Fatalf("top_k = %v", profile.TopK)
 	}
+	if profile.MinP == nil || *profile.MinP != 0.05 {
+		t.Fatalf("min_p = %v", profile.MinP)
+	}
 	if profile.PresencePenalty == nil || *profile.PresencePenalty != 0.1 {
 		t.Fatalf("presence penalty = %v", profile.PresencePenalty)
+	}
+	if profile.RepetitionPenalty == nil || *profile.RepetitionPenalty != 1.1 {
+		t.Fatalf("repetition penalty = %v", profile.RepetitionPenalty)
 	}
 	chatTemplateKwargs, ok := profile.ExtraBody["chat_template_kwargs"].(map[string]any)
 	if !ok {

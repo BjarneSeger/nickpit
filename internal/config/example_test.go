@@ -68,8 +68,12 @@ func TestExampleYAMLContainsDefaultProfiles(t *testing.T) {
 		if profile.DiffFormat != model.DiffFormatGit {
 			t.Fatalf("%s diff format = %q", entry.name, profile.DiffFormat)
 		}
-		if profile.ReasoningEffort != DefaultReasoningEffort {
-			t.Fatalf("%s reasoning effort = %q", entry.name, profile.ReasoningEffort)
+		wantEffort := entry.profile.ReasoningEffort
+		if wantEffort == "" {
+			wantEffort = DefaultReasoningEffort
+		}
+		if profile.ReasoningEffort != wantEffort {
+			t.Fatalf("%s reasoning effort = %q, want %q", entry.name, profile.ReasoningEffort, wantEffort)
 		}
 	}
 }

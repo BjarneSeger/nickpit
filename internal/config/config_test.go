@@ -120,7 +120,9 @@ func TestLoadConfigUsesSmallModelEnv(t *testing.T) {
 	t.Setenv("NICKPIT_SMALL_TEMPERATURE", "0.25")
 	t.Setenv("NICKPIT_SMALL_TOP_P", "0.85")
 	t.Setenv("NICKPIT_SMALL_TOP_K", "40")
+	t.Setenv("NICKPIT_SMALL_MIN_P", "0.05")
 	t.Setenv("NICKPIT_SMALL_PRESENCE_PENALTY", "0.1")
+	t.Setenv("NICKPIT_SMALL_REPETITION_PENALTY", "1.1")
 	t.Setenv("NICKPIT_SMALL_EXTRA_BODY", `{"chat_template_kwargs":{"enable_thinking":false}}`)
 
 	_, profile, err := Load("", Overrides{})
@@ -145,8 +147,14 @@ func TestLoadConfigUsesSmallModelEnv(t *testing.T) {
 	if profile.Small.TopK == nil || *profile.Small.TopK != 40 {
 		t.Fatalf("small top_k = %v", profile.Small.TopK)
 	}
+	if profile.Small.MinP == nil || *profile.Small.MinP != 0.05 {
+		t.Fatalf("small min_p = %v", profile.Small.MinP)
+	}
 	if profile.Small.PresencePenalty == nil || *profile.Small.PresencePenalty != 0.1 {
 		t.Fatalf("small presence penalty = %v", profile.Small.PresencePenalty)
+	}
+	if profile.Small.RepetitionPenalty == nil || *profile.Small.RepetitionPenalty != 1.1 {
+		t.Fatalf("small repetition penalty = %v", profile.Small.RepetitionPenalty)
 	}
 	chatTemplateKwargs, ok := profile.Small.ExtraBody["chat_template_kwargs"].(map[string]any)
 	if !ok || chatTemplateKwargs["enable_thinking"] != false {
@@ -219,7 +227,9 @@ profiles:
       temperature: 0.25
       top_p: 0.85
       top_k: 40
+      min_p: 0.05
       presence_penalty: 0.1
+      repetition_penalty: 1.1
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -250,8 +260,14 @@ profiles:
 	if profile.Small.TopK == nil || *profile.Small.TopK != 40 {
 		t.Fatalf("small top_k = %v", profile.Small.TopK)
 	}
+	if profile.Small.MinP == nil || *profile.Small.MinP != 0.05 {
+		t.Fatalf("small min_p = %v", profile.Small.MinP)
+	}
 	if profile.Small.PresencePenalty == nil || *profile.Small.PresencePenalty != 0.1 {
 		t.Fatalf("small presence penalty = %v", profile.Small.PresencePenalty)
+	}
+	if profile.Small.RepetitionPenalty == nil || *profile.Small.RepetitionPenalty != 1.1 {
+		t.Fatalf("small repetition penalty = %v", profile.Small.RepetitionPenalty)
 	}
 	chatTemplateKwargs, ok := profile.Small.ExtraBody["chat_template_kwargs"].(map[string]any)
 	if !ok || chatTemplateKwargs["enable_thinking"] != false {
@@ -1048,6 +1064,79 @@ profiles:
 	}
 }
 
+func TestLoadConfigScopesSupportedModelsToEndpoint(t *testing.T) {
+	const replacementURL = "https://replacement.invalid/v1"
+	tests := []struct {
+		name      string
+		config    string
+		envURL    string
+		overrides Overrides
+		wantCount int
+	}{
+		{
+			name: "same-name config override",
+			config: `
+profiles:
+  mittwald:
+    base_url: https://replacement.invalid/v1
+`,
+		},
+		{
+			name:   "environment override",
+			envURL: replacementURL,
+		},
+		{
+			name:      "CLI override",
+			overrides: Overrides{BaseURL: replacementURL},
+		},
+		{
+			name: "config override with replacement declarations",
+			config: `
+profiles:
+  mittwald:
+    base_url: https://replacement.invalid/v1
+    supported_models:
+      - model: replacement-model
+        compatible: true
+`,
+			wantCount: 1,
+		},
+		{
+			name: "normalized same endpoint",
+			config: `
+profiles:
+  mittwald:
+    base_url: https://llm.aihosting.mittwald.de/v1/
+`,
+			wantCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := ""
+			if tt.config != "" {
+				path = filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(tt.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.envURL != "" {
+				t.Setenv("NICKPIT_BASE_URL", tt.envURL)
+			}
+			tt.overrides.Profile = "mittwald"
+
+			_, profile, err := Load(path, tt.overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(profile.SupportedModels) != tt.wantCount {
+				t.Fatalf("supported models = %#v, want %d entries", profile.SupportedModels, tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestCloneProfileCopiesSupportedModels(t *testing.T) {
 	jsonSchema := true
 	profile := Profile{SupportedModels: []ModelCapabilities{{
@@ -1233,7 +1322,7 @@ profiles:
 	}
 }
 
-func TestLoadConfigTopKAndPresencePenaltyFromFile(t *testing.T) {
+func TestLoadConfigSamplingParamsFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	err := os.WriteFile(path, []byte(`
@@ -1241,7 +1330,9 @@ profiles:
   default:
     model: test-model
     top_k: 40
+    min_p: 0.05
     presence_penalty: 0.1
+    repetition_penalty: 1.1
 `), 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -1254,16 +1345,24 @@ profiles:
 	if profile.TopK == nil || *profile.TopK != 40 {
 		t.Fatalf("top_k = %v", profile.TopK)
 	}
+	if profile.MinP == nil || *profile.MinP != 0.05 {
+		t.Fatalf("min_p = %v", profile.MinP)
+	}
 	if profile.PresencePenalty == nil || *profile.PresencePenalty != 0.1 {
 		t.Fatalf("presence_penalty = %v", profile.PresencePenalty)
 	}
+	if profile.RepetitionPenalty == nil || *profile.RepetitionPenalty != 1.1 {
+		t.Fatalf("repetition_penalty = %v", profile.RepetitionPenalty)
+	}
 }
 
-func TestLoadConfigTopKAndPresencePenaltyFromEnv(t *testing.T) {
+func TestLoadConfigSamplingParamsFromEnv(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "from-openrouter-env")
 	t.Setenv("NICKPIT_MODEL", "test-model")
 	t.Setenv("NICKPIT_TOP_K", "50")
+	t.Setenv("NICKPIT_MIN_P", "0.03")
 	t.Setenv("NICKPIT_PRESENCE_PENALTY", "0.2")
+	t.Setenv("NICKPIT_REPETITION_PENALTY", "1.2")
 
 	_, profile, err := Load("", Overrides{})
 	if err != nil {
@@ -1272,8 +1371,14 @@ func TestLoadConfigTopKAndPresencePenaltyFromEnv(t *testing.T) {
 	if profile.TopK == nil || *profile.TopK != 50 {
 		t.Fatalf("top_k = %v", profile.TopK)
 	}
+	if profile.MinP == nil || *profile.MinP != 0.03 {
+		t.Fatalf("min_p = %v", profile.MinP)
+	}
 	if profile.PresencePenalty == nil || *profile.PresencePenalty != 0.2 {
 		t.Fatalf("presence_penalty = %v", profile.PresencePenalty)
+	}
+	if profile.RepetitionPenalty == nil || *profile.RepetitionPenalty != 1.2 {
+		t.Fatalf("repetition_penalty = %v", profile.RepetitionPenalty)
 	}
 }
 

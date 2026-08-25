@@ -184,15 +184,17 @@ func (s StepEntry) LaneSteps() []StepEntry {
 // step.
 type StepOverride struct {
 	// Model parameters (apply to the step's engine clone).
-	Model           *string        `yaml:"model"`
-	Temperature     *float64       `yaml:"temperature"`
-	TopP            *float64       `yaml:"top_p"`
-	TopK            *int           `yaml:"top_k"`
-	PresencePenalty *float64       `yaml:"presence_penalty"`
-	MaxTokens       *int           `yaml:"max_tokens"`
-	ExtraBody       map[string]any `yaml:"extra_body"`
-	ReasoningEffort *string        `yaml:"reasoning_effort"`
-	TimeBudget      *TimeBudget    `yaml:"time_budget"`
+	Model             *string        `yaml:"model"`
+	Temperature       *float64       `yaml:"temperature"`
+	TopP              *float64       `yaml:"top_p"`
+	TopK              *int           `yaml:"top_k"`
+	MinP              *float64       `yaml:"min_p"`
+	PresencePenalty   *float64       `yaml:"presence_penalty"`
+	RepetitionPenalty *float64       `yaml:"repetition_penalty"`
+	MaxTokens         *int           `yaml:"max_tokens"`
+	ExtraBody         map[string]any `yaml:"extra_body"`
+	ReasoningEffort   *string        `yaml:"reasoning_effort"`
+	TimeBudget        *TimeBudget    `yaml:"time_budget"`
 
 	// Scope declares the work unit this step's agents operate on (see ScopeAll
 	// etc.). It makes the step's fan-out explicit and is validated against the
@@ -317,7 +319,7 @@ func (o *StepOverride) ContextInclude() ContextIncludeSet {
 }
 
 var stepOverrideKeys = []string{
-	"model", "temperature", "top_p", "top_k", "presence_penalty", "max_tokens", "extra_body", "reasoning_effort", "time_budget",
+	"model", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty", "max_tokens", "extra_body", "reasoning_effort", "time_budget",
 	"scope",
 	"max_tool_calls", "max_duplicate_tool_calls",
 	"max_output_retries", "max_reasoning_seconds",
@@ -336,15 +338,17 @@ const CategorizeAgentKey = "categorize"
 // AgentOverride is the subset of per-step config that can sensibly apply to an
 // internal agent spawned by a review step.
 type AgentOverride struct {
-	Model           *string        `yaml:"model"`
-	Temperature     *float64       `yaml:"temperature"`
-	TopP            *float64       `yaml:"top_p"`
-	TopK            *int           `yaml:"top_k"`
-	PresencePenalty *float64       `yaml:"presence_penalty"`
-	MaxTokens       *int           `yaml:"max_tokens"`
-	ExtraBody       map[string]any `yaml:"extra_body"`
-	ReasoningEffort *string        `yaml:"reasoning_effort"`
-	TimeBudget      *TimeBudget    `yaml:"time_budget"`
+	Model             *string        `yaml:"model"`
+	Temperature       *float64       `yaml:"temperature"`
+	TopP              *float64       `yaml:"top_p"`
+	TopK              *int           `yaml:"top_k"`
+	MinP              *float64       `yaml:"min_p"`
+	PresencePenalty   *float64       `yaml:"presence_penalty"`
+	RepetitionPenalty *float64       `yaml:"repetition_penalty"`
+	MaxTokens         *int           `yaml:"max_tokens"`
+	ExtraBody         map[string]any `yaml:"extra_body"`
+	ReasoningEffort   *string        `yaml:"reasoning_effort"`
+	TimeBudget        *TimeBudget    `yaml:"time_budget"`
 
 	MaxToolCalls          *int `yaml:"max_tool_calls"`
 	MaxDuplicateToolCalls *int `yaml:"max_duplicate_tool_calls"`
@@ -356,7 +360,7 @@ type AgentOverride struct {
 }
 
 var agentOverrideKeys = []string{
-	"model", "temperature", "top_p", "top_k", "presence_penalty", "max_tokens", "extra_body", "reasoning_effort", "time_budget",
+	"model", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty", "max_tokens", "extra_body", "reasoning_effort", "time_budget",
 	"max_tool_calls", "max_duplicate_tool_calls",
 	"max_output_retries", "max_reasoning_seconds",
 	"disable_parallel_tool_calls", "disable_json_response_format",
@@ -403,9 +407,17 @@ func (o *StepOverride) Resolve(p config.Profile, req model.ReviewRequest) (confi
 		v := *o.TopK
 		p.TopK = &v
 	}
+	if o.MinP != nil {
+		v := *o.MinP
+		p.MinP = &v
+	}
 	if o.PresencePenalty != nil {
 		v := *o.PresencePenalty
 		p.PresencePenalty = &v
+	}
+	if o.RepetitionPenalty != nil {
+		v := *o.RepetitionPenalty
+		p.RepetitionPenalty = &v
 	}
 	if o.MaxTokens != nil {
 		v := *o.MaxTokens
@@ -495,9 +507,17 @@ func (o *AgentOverride) Resolve(p config.Profile, req model.ReviewRequest) (conf
 		v := *o.TopK
 		p.TopK = &v
 	}
+	if o.MinP != nil {
+		v := *o.MinP
+		p.MinP = &v
+	}
 	if o.PresencePenalty != nil {
 		v := *o.PresencePenalty
 		p.PresencePenalty = &v
+	}
+	if o.RepetitionPenalty != nil {
+		v := *o.RepetitionPenalty
+		p.RepetitionPenalty = &v
 	}
 	if o.MaxTokens != nil {
 		v := *o.MaxTokens

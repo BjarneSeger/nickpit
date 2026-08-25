@@ -28,7 +28,9 @@ type agentLoopRequest struct {
 	Temperature                       *float64
 	TopP                              *float64
 	TopK                              *int
+	MinP                              *float64
 	PresencePenalty                   *float64
+	RepetitionPenalty                 *float64
 	ExtraBody                         map[string]any
 	ReasoningEffort                   string
 	ReasoningSink                     llm.ReasoningSink
@@ -113,7 +115,9 @@ func (e *Engine) runAgentLoop(ctx context.Context, req agentLoopRequest) (agentL
 		Temperature:       req.Temperature,
 		TopP:              req.TopP,
 		TopK:              req.TopK,
+		MinP:              req.MinP,
 		PresencePenalty:   req.PresencePenalty,
+		RepetitionPenalty: req.RepetitionPenalty,
 		ExtraBody:         req.ExtraBody,
 		ParallelToolCalls: req.ParallelToolCalls,
 		ReasoningEffort:   req.ReasoningEffort,

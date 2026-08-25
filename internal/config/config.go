@@ -58,7 +58,9 @@ type Profile struct {
 	Temperature               *float64               `yaml:"temperature"`
 	TopP                      *float64               `yaml:"top_p"`
 	TopK                      *int                   `yaml:"top_k"`
+	MinP                      *float64               `yaml:"min_p"`
 	PresencePenalty           *float64               `yaml:"presence_penalty"`
+	RepetitionPenalty         *float64               `yaml:"repetition_penalty"`
 	ExtraBody                 map[string]any         `yaml:"extra_body"`
 	DisableJSONResponseFormat bool                   `yaml:"disable_json_response_format"`
 	IncludePaths              []string               `yaml:"include_paths"`
@@ -115,16 +117,18 @@ type Profile struct {
 // second LLM endpoint; that case requires its own APIKey (validated in
 // normalizeProfile) so the primary key is never sent to a foreign host.
 type SmallModelConfig struct {
-	Model           string         `yaml:"model"`
-	BaseURL         string         `yaml:"base_url"`
-	APIKey          string         `yaml:"api_key"`
-	MaxTokens       *int           `yaml:"max_tokens"`
-	Temperature     *float64       `yaml:"temperature"`
-	TopP            *float64       `yaml:"top_p"`
-	TopK            *int           `yaml:"top_k"`
-	PresencePenalty *float64       `yaml:"presence_penalty"`
-	ExtraBody       map[string]any `yaml:"extra_body"`
-	ReasoningEffort string         `yaml:"reasoning_effort"`
+	Model             string         `yaml:"model"`
+	BaseURL           string         `yaml:"base_url"`
+	APIKey            string         `yaml:"api_key"`
+	MaxTokens         *int           `yaml:"max_tokens"`
+	Temperature       *float64       `yaml:"temperature"`
+	TopP              *float64       `yaml:"top_p"`
+	TopK              *int           `yaml:"top_k"`
+	MinP              *float64       `yaml:"min_p"`
+	PresencePenalty   *float64       `yaml:"presence_penalty"`
+	RepetitionPenalty *float64       `yaml:"repetition_penalty"`
+	ExtraBody         map[string]any `yaml:"extra_body"`
+	ReasoningEffort   string         `yaml:"reasoning_effort"`
 }
 
 type ModelCapabilities struct {
@@ -155,7 +159,9 @@ type Overrides struct {
 	Temperature               *float64
 	TopP                      *float64
 	TopK                      *int
+	MinP                      *float64
 	PresencePenalty           *float64
+	RepetitionPenalty         *float64
 	ExtraBody                 map[string]any
 	DisableJSONResponseFormat bool
 	IncludePaths              *[]string
@@ -209,12 +215,45 @@ var defaultProfiles = []defaultProfile{
 		name: "mittwald",
 		profile: Profile{
 			BaseURL:         "https://llm.aihosting.mittwald.de/v1",
-			Model:           "Qwen3.5-122B-A10B-FP8",
-			ReasoningEffort: "high",
-			Temperature:     ptrTo(0.6),
-			TopP:            ptrTo(0.95),
-			TopK:            ptrTo(20),
-			PresencePenalty: ptrTo(1.0),
+			Model:           "Qwen3.8-27B-NVFP4",
+			ReasoningEffort: "xhigh",
+			// Pre-declared so the serving stack is not re-probed on every fresh
+			// cache. Both models run on the same endpoint, so the primary and
+			// the @small model are matched by name from this one list.
+			SupportedModels: []ModelCapabilities{
+				{
+					Model:      "Qwen3.8-27B-NVFP4",
+					Compatible: true,
+					Response:   true,
+					Reasoning: ReasoningCapabilities{
+						Traces:  true,
+						Efforts: []string{"xhigh", "medium", "low"},
+					},
+					Tools:           true,
+					JSONSchema:      ptrTo(true),
+					JSONResponse:    ptrTo(true),
+					ToolsJSONSchema: ptrTo(false),
+				},
+				{
+					Model:      "Qwen3.6-35B-A3B-FP8",
+					Compatible: true,
+					Response:   true,
+					Reasoning: ReasoningCapabilities{
+						Traces:  false,
+						Efforts: []string{"none"},
+					},
+					Tools:           true,
+					JSONSchema:      ptrTo(true),
+					JSONResponse:    ptrTo(true),
+					ToolsJSONSchema: ptrTo(false),
+				},
+			},
+			Temperature:       ptrTo(1.0),
+			TopP:              ptrTo(0.95),
+			TopK:              ptrTo(20),
+			MinP:              ptrTo(0.0),
+			PresencePenalty:   ptrTo(0.0),
+			RepetitionPenalty: ptrTo(1.0),
 			Small: SmallModelConfig{
 				Model:           "Qwen3.6-35B-A3B-FP8",
 				ReasoningEffort: "none",
@@ -294,9 +333,17 @@ func cloneProfile(profile Profile) Profile {
 		value := *profile.TopK
 		profile.TopK = &value
 	}
+	if profile.MinP != nil {
+		value := *profile.MinP
+		profile.MinP = &value
+	}
 	if profile.PresencePenalty != nil {
 		value := *profile.PresencePenalty
 		profile.PresencePenalty = &value
+	}
+	if profile.RepetitionPenalty != nil {
+		value := *profile.RepetitionPenalty
+		profile.RepetitionPenalty = &value
 	}
 	profile.ExtraBody = cloneMap(profile.ExtraBody)
 	profile.Small = cloneSmallModelConfig(profile.Small)
@@ -327,9 +374,17 @@ func cloneSmallModelConfig(small SmallModelConfig) SmallModelConfig {
 		value := *small.TopK
 		small.TopK = &value
 	}
+	if small.MinP != nil {
+		value := *small.MinP
+		small.MinP = &value
+	}
 	if small.PresencePenalty != nil {
 		value := *small.PresencePenalty
 		small.PresencePenalty = &value
+	}
+	if small.RepetitionPenalty != nil {
+		value := *small.RepetitionPenalty
+		small.RepetitionPenalty = &value
 	}
 	small.ExtraBody = cloneMap(small.ExtraBody)
 	return small
@@ -357,8 +412,14 @@ func mergeSmallModelConfig(base, override SmallModelConfig) SmallModelConfig {
 	if override.TopK != nil {
 		base.TopK = override.TopK
 	}
+	if override.MinP != nil {
+		base.MinP = override.MinP
+	}
 	if override.PresencePenalty != nil {
 		base.PresencePenalty = override.PresencePenalty
+	}
+	if override.RepetitionPenalty != nil {
+		base.RepetitionPenalty = override.RepetitionPenalty
 	}
 	if override.ExtraBody != nil {
 		base.ExtraBody = override.ExtraBody
@@ -407,8 +468,14 @@ func EffectiveSmallProfile(profile Profile) Profile {
 	if small.TopK != nil {
 		profile.TopK = small.TopK
 	}
+	if small.MinP != nil {
+		profile.MinP = small.MinP
+	}
 	if small.PresencePenalty != nil {
 		profile.PresencePenalty = small.PresencePenalty
+	}
+	if small.RepetitionPenalty != nil {
+		profile.RepetitionPenalty = small.RepetitionPenalty
 	}
 	if small.ExtraBody != nil {
 		profile.ExtraBody = small.ExtraBody
@@ -434,6 +501,10 @@ func cloneSupportedModels(models []ModelCapabilities) []ModelCapabilities {
 		if model.JSONResponse != nil {
 			value := *model.JSONResponse
 			cloned[i].JSONResponse = &value
+		}
+		if model.ToolsJSONSchema != nil {
+			value := *model.ToolsJSONSchema
+			cloned[i].ToolsJSONSchema = &value
 		}
 	}
 	return cloned
@@ -636,12 +707,26 @@ func applyEnv(cfg *Config, profileName string) error {
 		}
 		profile.TopK = &parsed
 	}
+	if value := os.Getenv("NICKPIT_MIN_P"); value != "" {
+		parsed, err := parseEnvFloat("NICKPIT_MIN_P", value)
+		if err != nil {
+			return err
+		}
+		profile.MinP = &parsed
+	}
 	if value := os.Getenv("NICKPIT_PRESENCE_PENALTY"); value != "" {
 		parsed, err := parseEnvFloat("NICKPIT_PRESENCE_PENALTY", value)
 		if err != nil {
 			return err
 		}
 		profile.PresencePenalty = &parsed
+	}
+	if value := os.Getenv("NICKPIT_REPETITION_PENALTY"); value != "" {
+		parsed, err := parseEnvFloat("NICKPIT_REPETITION_PENALTY", value)
+		if err != nil {
+			return err
+		}
+		profile.RepetitionPenalty = &parsed
 	}
 	if value := os.Getenv("NICKPIT_EXTRA_BODY"); strings.TrimSpace(value) != "" {
 		extraBody, err := parseEnvExtraBody("NICKPIT_EXTRA_BODY", value)
@@ -678,12 +763,26 @@ func applyEnv(cfg *Config, profileName string) error {
 		}
 		profile.Small.TopK = &parsed
 	}
+	if value := os.Getenv("NICKPIT_SMALL_MIN_P"); value != "" {
+		parsed, err := parseEnvFloat("NICKPIT_SMALL_MIN_P", value)
+		if err != nil {
+			return err
+		}
+		profile.Small.MinP = &parsed
+	}
 	if value := os.Getenv("NICKPIT_SMALL_PRESENCE_PENALTY"); value != "" {
 		parsed, err := parseEnvFloat("NICKPIT_SMALL_PRESENCE_PENALTY", value)
 		if err != nil {
 			return err
 		}
 		profile.Small.PresencePenalty = &parsed
+	}
+	if value := os.Getenv("NICKPIT_SMALL_REPETITION_PENALTY"); value != "" {
+		parsed, err := parseEnvFloat("NICKPIT_SMALL_REPETITION_PENALTY", value)
+		if err != nil {
+			return err
+		}
+		profile.Small.RepetitionPenalty = &parsed
 	}
 	if value := os.Getenv("NICKPIT_SMALL_EXTRA_BODY"); strings.TrimSpace(value) != "" {
 		extraBody, err := parseEnvExtraBody("NICKPIT_SMALL_EXTRA_BODY", value)
@@ -693,7 +792,7 @@ func applyEnv(cfg *Config, profileName string) error {
 		profile.Small.ExtraBody = extraBody
 	}
 	if value := os.Getenv("NICKPIT_BASE_URL"); value != "" {
-		profile.BaseURL = value
+		overrideProfileBaseURL(&profile, value)
 	}
 	if value := os.Getenv("NICKPIT_WORKDIR"); value != "" {
 		profile.Workdir = value
@@ -768,7 +867,7 @@ func applyOverrides(profile Profile, overrides Overrides) (Profile, error) {
 	}
 	profile.Small = mergeSmallModelConfig(profile.Small, overrides.Small)
 	if overrides.BaseURL != "" {
-		profile.BaseURL = overrides.BaseURL
+		overrideProfileBaseURL(&profile, overrides.BaseURL)
 	}
 	if overrides.APIKey != "" {
 		profile.APIKey = overrides.APIKey
@@ -785,8 +884,14 @@ func applyOverrides(profile Profile, overrides Overrides) (Profile, error) {
 	if overrides.TopK != nil {
 		profile.TopK = overrides.TopK
 	}
+	if overrides.MinP != nil {
+		profile.MinP = overrides.MinP
+	}
 	if overrides.PresencePenalty != nil {
 		profile.PresencePenalty = overrides.PresencePenalty
+	}
+	if overrides.RepetitionPenalty != nil {
+		profile.RepetitionPenalty = overrides.RepetitionPenalty
 	}
 	if overrides.ExtraBody != nil {
 		profile.ExtraBody = overrides.ExtraBody
