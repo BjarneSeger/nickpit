@@ -44,9 +44,9 @@ func stampGeneratedFlags(reviewCtx *model.ReviewContext) {
 //
 // A deleted path is not in that tree, and the removed side of its patch is exactly
 // where a removed link target sits — so for those entries the change's own commits
-// are asked what they deleted instead (see git.DeletedFileModes). GitHub reports
-// one entry per path, so a deletion mark cannot bleed into a same-path addition
-// the way a diff-derived mark could.
+// are asked instead, and only a mode they all agree on is taken (see
+// git.StableFileModes). GitHub reports one entry per path, so a deletion mark
+// cannot bleed into a same-path addition the way a diff-derived mark could.
 //
 // Targets: a pure symlink rename emits no hunk and no content in ANY source, so the
 // link target is nowhere in the patch — yet whether a relative target still resolves
@@ -159,9 +159,11 @@ func stampSymlinkFlags(ctx context.Context, reviewCtx *model.ReviewContext, runn
 	})
 }
 
-// deletedSymlinkPaths reports which of paths the change's own commits deleted as
-// symlinks. The commit list is the bound on the lookup: the deletion under review
-// is in one of them, and nothing else is examined.
+// deletedSymlinkPaths reports which of paths were symlinks on the pre-change side,
+// for paths the change deletes. The commit list is the bound on the lookup: the
+// deletion under review is in one of them, and nothing else is examined. A path
+// whose mode is not the same throughout that range is left out rather than guessed
+// at — see git.StableFileModes.
 func deletedSymlinkPaths(ctx context.Context, runner git.Runner, reviewCtx *model.ReviewContext, paths []string) map[string]bool {
 	if len(paths) == 0 || len(reviewCtx.Commits) == 0 {
 		return nil
@@ -172,7 +174,7 @@ func deletedSymlinkPaths(ctx context.Context, runner git.Runner, reviewCtx *mode
 			commits = append(commits, commit.SHA)
 		}
 	}
-	modes, _ := git.DeletedFileModes(ctx, runner, commits, paths)
+	modes, _ := git.StableFileModes(ctx, runner, commits, paths)
 	if len(modes) == 0 {
 		return nil
 	}

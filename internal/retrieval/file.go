@@ -46,7 +46,7 @@ func (e *LocalEngine) GetFile(_ context.Context, repoRoot, path string) (*FileCo
 			Language: detectLanguage(normalizedPath),
 		}, nil
 	}
-	data, truncated, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
+	data, truncated, _, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: reading %s: %w", normalizedPath, err)
 	}
@@ -60,8 +60,9 @@ func (e *LocalEngine) GetFile(_ context.Context, repoRoot, path string) (*FileCo
 
 // readFileCapped reads up to limit bytes from fullPath (which must resolve
 // inside repoRoot, enforced via repofs.Open), reporting whether the file was
-// longer than the limit. It reads at most limit+1 bytes so truncation is
-// detected without buffering the whole file.
+// longer than the limit, and whether what it read was a symlink rather than a
+// file. It reads at most limit+1 bytes so truncation is detected without buffering
+// the whole file.
 //
 // A symlink is read as a symlink: the result is its target path, not the target
 // file's text. Following it would attribute another file's lines to the link's
@@ -70,18 +71,18 @@ func (e *LocalEngine) GetFile(_ context.Context, repoRoot, path string) (*FileCo
 // would be wrong. Callers that must preserve the target's exact bytes read the
 // link themselves (see GetFile); the line-oriented callers of this function
 // normalize a link's target like any other text, because they match lines.
-func readFileCapped(repoRoot, fullPath string, limit int) ([]byte, bool, error) {
+func readFileCapped(repoRoot, fullPath string, limit int) ([]byte, bool, bool, error) {
 	if target, ok := repofs.LinkTarget(repoRoot, fullPath); ok {
-		return []byte(target), false, nil
+		return []byte(target), false, true, nil
 	}
 	f, err := repofs.Open(repoRoot, fullPath)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if len(data) > limit {
 		truncated := data[:limit]
@@ -95,9 +96,9 @@ func readFileCapped(repoRoot, fullPath string, limit int) ([]byte, bool, error) 
 			}
 			break
 		}
-		return truncated, true, nil
+		return truncated, true, false, nil
 	}
-	return data, false, nil
+	return data, false, false, nil
 }
 
 func (e *LocalEngine) ListFiles(_ context.Context, repoRoot, path string, depth int) (*DirectoryListing, error) {
@@ -236,7 +237,7 @@ func (e *LocalEngine) GetFileSlice(_ context.Context, repoRoot, path string, sta
 // returned range metadata and the returned content describe the same lines, and a
 // carriage return inside a pathname stays a carriage return.
 func linkTargetSlice(normalizedPath, target string, start, end int) (*FileSlice, error) {
-	lines := SplitLinkTargetLines(target)
+	lines := SplitGitLines(target)
 	if start > len(lines) {
 		return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, len(lines))
 	}
@@ -385,7 +386,9 @@ func runFileSearch(repoRoot, path string, contextLines, maxResults int, matcher 
 	}
 	results := make([]SearchResult, 0)
 	appendMatches := func(relPath, content string) error {
-		lines := splitLines(content)
+		// Content arrives already line-normalized (a link target keeps its own
+		// bytes), so the lines are counted exactly as git counts them.
+		lines := SplitGitLines(content)
 		language := detectLanguage(relPath)
 		for _, span := range matcher(lines) {
 			result := SearchResult{
@@ -446,7 +449,7 @@ func walkRepoTextFiles(repoRoot, path string, visit func(relPath, content string
 		if err != nil {
 			return err
 		}
-		data, truncated, err := readFileCapped(repoRoot, fileFullPath, toollimits.MaxRetrievedFileBytes)
+		data, truncated, isLink, err := readFileCapped(repoRoot, fileFullPath, toollimits.MaxRetrievedFileBytes)
 		if err != nil {
 			return nil
 		}
@@ -456,7 +459,15 @@ func walkRepoTextFiles(repoRoot, path string, visit func(relPath, content string
 		if truncated {
 			truncatedFiles = append(truncatedFiles, relPath)
 		}
-		return visit(relPath, normalizeText(string(data)))
+		text := normalizeText(string(data))
+		if isLink {
+			// A link's content is its target pathname, so a lone carriage return
+			// in it is part of the NAME, not a line ending. Only a trailing LF is
+			// dropped — the same lines git counts, and the same ones
+			// SplitGitLines and the diff-scope locations count.
+			text = strings.TrimSuffix(string(data), "\n")
+		}
+		return visit(relPath, text)
 	}
 
 	// A symlink is one entry whose content is its target path (see readFileCapped),
@@ -530,17 +541,22 @@ func normalizeText(text string) string {
 	return strings.TrimSuffix(text, "\n")
 }
 
-// SplitLinkTargetLines splits a symlink target the way git counts a blob's lines:
-// on LF alone, with at most one trailing LF dropped. A pathname may legally
-// contain a lone carriage return or a CRLF pair, and those bytes are part of the
-// NAME — folding them the way normalizeText folds text-file line endings would
-// both invent lines git does not see and hand back a target that is not the one
-// stored. An empty target has no lines.
-func SplitLinkTargetLines(target string) []string {
-	if target == "" {
+// SplitGitLines splits already-line-normalized content the way git counts a blob's
+// lines: on LF alone, with at most one trailing LF dropped. Empty content has no
+// lines.
+//
+// Text read out of the repository arrives normalized (see normalizeText), so for
+// it this is exactly a line split. A symlink's content is different: it is the
+// target PATHNAME, where a lone carriage return or a CRLF pair is part of the name
+// itself. Folding those the way text-file line endings are folded would invent
+// lines git does not see — and every consumer that reports a line number has to
+// agree with git here, or a location that a tool reported is rejected as outside
+// the diff by scope validation.
+func SplitGitLines(content string) []string {
+	if content == "" {
 		return nil
 	}
-	return strings.Split(strings.TrimSuffix(target, "\n"), "\n")
+	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
 }
 
 func splitLines(text string) []string {

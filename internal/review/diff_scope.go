@@ -23,7 +23,9 @@ func allowedDiffCodeLocations(hunks []model.DiffHunk, changed []model.ChangedFil
 		// against it by allowedPathMatches, which tolerates model-added noise on
 		// the finding's side only.
 		path := hunk.FilePath
-		if strings.TrimSpace(path) == "" {
+		// Only an absent path is skipped: whitespace is a legal git filename, and
+		// trimming it away here would silently deny that file any scope at all.
+		if path == "" {
 			continue
 		}
 		language := hunk.Language
@@ -119,7 +121,9 @@ func splitDiffHunkSides(content string) (oldContent, newContent string, oldCount
 // between hunks.
 func codeLocationOverlapsAllowed(loc model.CodeLocation, allowed []model.CodeLocation) bool {
 	start := loc.LineRange.Start
-	if strings.TrimSpace(loc.FilePath) == "" || start <= 0 {
+	// A path of nothing but whitespace is a legal git filename, so it identifies a
+	// file like any other; only an absent path cannot be matched.
+	if loc.FilePath == "" || start <= 0 {
 		return false
 	}
 	end := max(loc.LineRange.End, start)
@@ -191,7 +195,7 @@ func metadataOnlySymlinkLocations(hunks []model.DiffHunk, changed []model.Change
 	seen := make(map[string]bool, len(changed))
 	for _, file := range changed {
 		path := file.Path
-		if !file.Symlink || strings.TrimSpace(path) == "" || hasHunk[path] || seen[path] {
+		if !file.Symlink || path == "" || hasHunk[path] || seen[path] {
 			continue
 		}
 		// Scope without evidence would invite a finding the prompt cannot ground:
@@ -202,7 +206,7 @@ func metadataOnlySymlinkLocations(hunks []model.DiffHunk, changed []model.Change
 			continue
 		}
 		seen[path] = true
-		lines := max(len(retrieval.SplitLinkTargetLines(file.SymlinkTarget)), 1)
+		lines := max(len(retrieval.SplitGitLines(file.SymlinkTarget)), 1)
 		locations = append(locations, model.CodeLocation{
 			FilePath:  path,
 			LineRange: model.LineRange{Start: 1, End: lines, Count: lines},

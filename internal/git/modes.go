@@ -78,29 +78,42 @@ func SymlinkPathsAtRev(ctx context.Context, runner Runner, rev string, paths []s
 	return symlinks, firstErr
 }
 
-// DeletedFileModes reports what the given commits deleted, as "git diff --raw"
-// spells it: the pre-change mode of every deleted path among paths, keyed by path.
+// StableFileModes reports the file mode of each of paths, but only for the paths
+// whose mode is the SAME in every side of every entry the given commits show for
+// them. Paths the commits do not touch, and paths whose mode changes anywhere
+// inside that range, are absent from the result. No blob names are reported: a
+// deletion's surviving blob is the pre-image one, which this listing's destination
+// column does not carry.
 //
-// A deleted path is absent from the reviewed tree, so SymlinkPathsAtRev can say
-// nothing about it — yet the removed side of the patch is exactly where a removed
-// symlink's target sits, and a source that reports no file modes (GitHub) leaves
-// the entry unmarked otherwise. The pre-image mode of the deletion itself is the
-// authority: the commit that removed the path states it.
+// This answers the question a deleted path raises. It is absent from the reviewed
+// tree, so SymlinkPathsAtRev can say nothing about it — yet the removed side of
+// the patch is exactly where a removed symlink's target sits, and a source that
+// reports no file modes (GitHub) leaves the entry unmarked otherwise. What the
+// review needs is the mode on the pre-change side of the WHOLE change, and the
+// only way this listing can vouch for that is unanimity: if the path was a symlink
+// at every point the range touches it, it was a symlink before the range too.
+//
+// Disagreement is therefore reported as nothing rather than as a pick. A path
+// deleted, re-added as a regular file and deleted again — or a regular file
+// typechanged into a symlink and then removed — has no single pre-change mode
+// here, and choosing one would mean marking a link as text or text as a link. That
+// also makes the result independent of ordering: neither git's sort of --no-walk
+// output nor the order commits are chunked in can change it.
 //
 // The listing is restricted to the named commits with --no-walk, so nothing walks
-// history: the deletion under review happened in one of the change's own commits,
-// and a commit the checkout does not have simply fails the lookup. --no-renames
-// keeps a deletion a deletion; git would otherwise pair it with an addition
-// elsewhere and drop it from the filter. Sorted --no-walk output is newest-first,
-// so the most recent deletion of a path wins.
+// history: the change under review happened in its own commits, and a commit the
+// checkout does not have simply fails the lookup. --no-renames keeps a deletion a
+// deletion; git would otherwise pair it with an addition elsewhere and hide the
+// mode this looks for.
 //
 // A failing call yields no modes rather than a guess. The error is returned so a
 // caller that can log it may, but it never invalidates what was collected.
-func DeletedFileModes(ctx context.Context, runner Runner, commits, paths []string) (FileModes, error) {
+func StableFileModes(ctx context.Context, runner Runner, commits, paths []string) (FileModes, error) {
 	if runner == nil || len(commits) == 0 || len(paths) == 0 {
 		return nil, nil
 	}
-	modes := FileModes{}
+	// "" marks a path whose sides disagree; it is dropped from the result.
+	seen := make(map[string]string, len(paths))
 	var firstErr error
 	for commitChunk := range slices.Chunk(commits, maxTreeQueryPaths) {
 		for pathChunk := range slices.Chunk(paths, maxTreeQueryPaths) {
@@ -108,7 +121,7 @@ func DeletedFileModes(ctx context.Context, runner Runner, commits, paths []strin
 			// --no-relative keeps the reported paths repo-root-relative: with
 			// diff.relative=true set in a user's config, a command run from a
 			// subdirectory would report "link" where the change says "sub/link".
-			args = append(args, "log", "--no-walk", "--format=", "--raw", "-z", "--no-relative", "--no-renames", "--diff-filter=D")
+			args = append(args, "log", "--no-walk", "--format=", "--raw", "-z", "--no-relative", "--no-renames")
 			args = append(args, commitChunk...)
 			args = append(args, "--")
 			for _, path := range pathChunk {
@@ -121,14 +134,57 @@ func DeletedFileModes(ctx context.Context, runner Runner, commits, paths []strin
 				}
 				continue
 			}
-			for path, entry := range ParseRawFileModes(out) {
-				if _, ok := modes[path]; !ok {
-					modes[path] = entry
-				}
-			}
+			collectStableModes(out, seen)
+		}
+	}
+	modes := FileModes{}
+	for path, mode := range seen {
+		if mode != "" {
+			modes[path] = RawFileEntry{Mode: mode}
 		}
 	}
 	return modes, firstErr
+}
+
+// collectStableModes folds "git log --raw -z" entries into per-path modes, marking
+// a path "" as soon as two of its stated modes differ. Absent sides ("000000") say
+// nothing about the mode and are skipped; an addition and a deletion of the same
+// kind of file therefore still agree.
+func collectStableModes(out string, seen map[string]string) {
+	tokens := strings.Split(out, "\x00")
+	for i := 0; i < len(tokens); i++ {
+		if !strings.HasPrefix(tokens[i], ":") {
+			continue
+		}
+		parents, dst, status, ok := RawEntryModes(tokens[i])
+		if !ok {
+			continue
+		}
+		paths := 1
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			paths = 2
+		}
+		if i+paths >= len(tokens) {
+			return
+		}
+		path := tokens[i+paths]
+		i += paths
+		if path == "" {
+			continue
+		}
+		for _, mode := range append(parents, dst) {
+			if mode == "" {
+				continue
+			}
+			switch current, known := seen[path]; {
+			case !known:
+				seen[path] = mode
+			case current != mode:
+				// Two different modes inside the range: nothing to vouch for.
+				seen[path] = ""
+			}
+		}
+	}
 }
 
 // collectTreeSymlinks parses "ls-tree -z" output. Each NUL-terminated entry is

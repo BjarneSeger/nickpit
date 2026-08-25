@@ -623,7 +623,7 @@ func forEachReferenceSource(ctx context.Context, repoRoot string, files []string
 		if err != nil {
 			continue
 		}
-		data, _, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
+		data, _, _, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
 		if err != nil {
 			continue
 		}
@@ -2354,7 +2354,7 @@ func readReferenceLines(repoRoot, path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, _, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
+	data, _, _, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -759,7 +759,7 @@ func TestReadFileCappedTrimsPartialRune(t *testing.T) {
 	if err := os.WriteFile(path, []byte("aa€"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	data, truncated, err := readFileCapped(dir, path, 3)
+	data, truncated, _, err := readFileCapped(dir, path, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -943,6 +943,64 @@ func TestLocalEngineKeepsLinkTargetBytesExact(t *testing.T) {
 	}
 	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 3, 3); err == nil {
 		t.Fatal("a range past the target returned a slice")
+	}
+}
+
+// Every consumer that reports a line number has to count a link target's lines the
+// way git does, or a location a tool reported is rejected as outside the diff.
+// A lone carriage return in a pathname is part of the NAME, so it starts no line.
+//
+// The query side is unaffected on purpose: NormalizeFindLinesCode folds line
+// endings in model-supplied text, so an exact-target find_lines query carrying a
+// raw carriage return still will not match one. That is query canonicalization,
+// not line counting.
+func TestLinkTargetLineNumbersAgreeAcrossTools(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "dir/a\rb"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	// Searching the text after the carriage return must report line 1, not line 2.
+	results, err := engine.Search(context.Background(), repoRoot, "link", "b", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.ResultCount != 1 || results.Results[0].CodeLocation.LineRange.Start != 1 {
+		t.Fatalf("search results = %#v, want one match on line 1", results.Results)
+	}
+	if got := results.Results[0].CodeLocation.Content; got != target {
+		t.Fatalf("search content = %q, want the target byte for byte", got)
+	}
+	slice, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 1, 0)
+	if err != nil || slice.EndLine != 1 {
+		t.Fatalf("slice = %#v, %v, want the same single line", slice, err)
+	}
+
+	// A plain target is reachable by exact find_lines query, which is what a
+	// code-location repair uses.
+	if err := os.Symlink("../plain/target.txt", filepath.Join(repoRoot, "plain")); err != nil {
+		t.Fatal(err)
+	}
+	found, err := engine.FindLines(context.Background(), repoRoot, "plain", "../plain/target.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.MatchCount != 1 || found.Matches[0].CodeLocation.LineRange.Start != 1 {
+		t.Fatalf("find_lines matches = %#v, want line 1", found.Matches)
+	}
+
+	// A real line break is still a line break.
+	if err := os.Symlink("dir/one\ntwo", filepath.Join(repoRoot, "multi")); err != nil {
+		t.Fatal(err)
+	}
+	multi, err := engine.Search(context.Background(), repoRoot, "multi", "two", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.ResultCount != 1 || multi.Results[0].CodeLocation.LineRange.Start != 2 {
+		t.Fatalf("multi-line target results = %#v, want a match on line 2", multi.Results)
 	}
 }
 

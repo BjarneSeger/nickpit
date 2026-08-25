@@ -318,6 +318,26 @@ func TestCodeLocationOverlapsAllowedCleansTheCandidateSide(t *testing.T) {
 	}
 }
 
+// A filename of nothing but spaces is legal in git. Trimming it away would leave
+// the entry with no allowed location at all, so every finding about that rename
+// would be dropped as out-of-scope while the prompt still shows the change.
+func TestMetadataOnlySymlinkLocationsKeepWhitespaceOnlyPaths(t *testing.T) {
+	changed := []model.ChangedFile{
+		{Path: "  ", Status: model.FileRenamed, OldPath: "old/link", Symlink: true, SymlinkTarget: "../target"},
+		// An absent path still identifies nothing and is skipped.
+		{Path: "", Status: model.FileRenamed, OldPath: "old/other", Symlink: true, SymlinkTarget: "../other"},
+	}
+
+	locations := metadataOnlySymlinkLocations(nil, changed)
+	if len(locations) != 1 || locations[0].FilePath != "  " {
+		t.Fatalf("locations = %#v, want the whitespace-named file only", locations)
+	}
+	finding := model.CodeLocation{FilePath: "  ", LineRange: model.LineRange{Start: 1, End: 1, Count: 1}}
+	if !codeLocationOverlapsAllowed(finding, locations) {
+		t.Fatal("a finding on the whitespace-named symlink is out of scope")
+	}
+}
+
 // A pathname may legally contain a newline, and git then renders the blob as
 // several lines. Scoping only line 1 would drop a valid finding anchored on the
 // second — the patch has no hunk to fall back on.

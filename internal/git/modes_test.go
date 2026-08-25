@@ -316,10 +316,10 @@ func TestParseRawFileModesKeepsBlobNames(t *testing.T) {
 	}
 }
 
-// A deleted path is absent from the reviewed tree, so only the deletion itself
-// states what the path was. The lookup must stay bounded to the change's own
-// commits and must not let git re-read a deletion as a rename.
-func TestDeletedFileModesReadsThePreImageMode(t *testing.T) {
+// A deleted path is absent from the reviewed tree, so only the change's own
+// commits state what the path was. The lookup must stay bounded to those commits
+// and must not let git re-read a deletion as a rename.
+func TestStableFileModesReadsThePreChangeMode(t *testing.T) {
 	runner := &stubGitRunner{
 		match: func(args []string) (string, bool) {
 			if args[0] != "log" {
@@ -332,7 +332,7 @@ func TestDeletedFileModesReadsThePreImageMode(t *testing.T) {
 		},
 	}
 
-	modes, err := DeletedFileModes(context.Background(), runner, []string{"c1", "c2"}, []string{"dir/link", "main.go"})
+	modes, err := StableFileModes(context.Background(), runner, []string{"c1", "c2"}, []string{"dir/link", "main.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestDeletedFileModesReadsThePreImageMode(t *testing.T) {
 		t.Fatalf("deleted regular file marked as a symlink: %#v", modes)
 	}
 	args := runner.calls[0]
-	for _, want := range []string{"--no-walk", "--no-renames", "--diff-filter=D", "c1", "c2"} {
+	for _, want := range []string{"--no-walk", "--no-renames", "c1", "c2"} {
 		if !slices.Contains(args, want) {
 			t.Fatalf("missing %q in %v", want, args)
 		}
@@ -363,16 +363,50 @@ func TestDeletedFileModesReadsThePreImageMode(t *testing.T) {
 	}
 }
 
+// A path whose mode is not the same everywhere inside the range has no pre-change
+// mode this listing can vouch for: deleted as a symlink, re-added as a regular
+// file and deleted again, either answer would be a guess. Order must not decide it
+// either — git sorts --no-walk output by commit date, and the commits arrive in
+// chunks.
+func TestStableFileModesRejectsDisagreeingModes(t *testing.T) {
+	entries := []string{
+		":100644 000000 45b983b 0000000 D\x00flipped\x00",
+		":120000 000000 32f64f4 0000000 D\x00flipped\x00",
+		":120000 000000 32f64f4 0000000 D\x00steady\x00",
+		":120000 120000 32f64f4 78bc337 M\x00steady\x00",
+	}
+	for _, order := range [][]string{entries, {entries[1], entries[0], entries[3], entries[2]}} {
+		runner := &stubGitRunner{}
+		runner.match = func(args []string) (string, bool) {
+			if args[0] != "log" {
+				return "", false
+			}
+			return strings.Join(order, ""), true
+		}
+		modes, err := StableFileModes(context.Background(), runner, []string{"c1"}, []string{"flipped", "steady"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := modes["flipped"]; ok {
+			t.Fatalf("a path with two modes was marked: %#v", modes)
+		}
+		// An entry whose every stated side agrees still answers.
+		if !modes.Symlink("steady") {
+			t.Fatalf("a path that was a symlink throughout lost its mode: %#v", modes)
+		}
+	}
+}
+
 // Without commits there is nothing to bound the lookup, and a failing call yields
 // no modes rather than a guess.
-func TestDeletedFileModesFailsClosed(t *testing.T) {
-	modes, err := DeletedFileModes(context.Background(), &stubGitRunner{}, nil, []string{"dir/link"})
+func TestStableFileModesFailsClosed(t *testing.T) {
+	modes, err := StableFileModes(context.Background(), &stubGitRunner{}, nil, []string{"dir/link"})
 	if modes != nil || err != nil {
 		t.Fatalf("modes = %#v, err = %v, want nothing without commits", modes, err)
 	}
 	failing := &stubGitRunner{matchErr: func(args []string) error { return errors.New("unknown revision") }}
 	failing.match = func(args []string) (string, bool) { return "", args[0] == "log" }
-	modes, err = DeletedFileModes(context.Background(), failing, []string{"c1"}, []string{"dir/link"})
+	modes, err = StableFileModes(context.Background(), failing, []string{"c1"}, []string{"dir/link"})
 	if len(modes) != 0 {
 		t.Fatalf("modes = %#v, want none from a failing call", modes)
 	}
