@@ -1288,6 +1288,29 @@ func validateStepOverrideValues(cfg *StepOverride) error {
 	if cfg.MaxFindings != nil && *cfg.MaxFindings < 0 {
 		return fmt.Errorf("max_findings must be non-negative")
 	}
+	// Same rule the profile-level config validation applies. Zero is the
+	// unlimited-retries setting, so a negative value is not a smaller budget but
+	// a malformed one, and the step overrides land on an already-normalized
+	// profile — nothing downstream would catch it.
+	if err := validateOutputRetries(cfg.MaxOutputRetries); err != nil {
+		return err
+	}
+	for _, agent := range []*AgentOverride{cfg.MineReasoning, cfg.CompileFindings, cfg.Nudge, cfg.Categorize} {
+		if agent == nil {
+			continue
+		}
+		if err := validateOutputRetries(agent.MaxOutputRetries); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateOutputRetries rejects a negative max_output_retries override.
+func validateOutputRetries(retries *int) error {
+	if retries != nil && *retries < 0 {
+		return fmt.Errorf("max_output_retries must be non-negative")
+	}
 	return nil
 }
 

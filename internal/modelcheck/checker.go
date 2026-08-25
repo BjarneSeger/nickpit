@@ -14,6 +14,7 @@ import (
 	"github.com/dgrieser/nickpit/internal/config"
 	"github.com/dgrieser/nickpit/internal/llm"
 	"github.com/dgrieser/nickpit/internal/logging"
+	"github.com/dgrieser/nickpit/internal/model"
 	"github.com/dgrieser/nickpit/internal/retrieval"
 	toolcatalog "github.com/dgrieser/nickpit/internal/tools"
 	"github.com/dgrieser/nickpit/prompts"
@@ -285,27 +286,97 @@ func (c *Checker) reviewProbeWithMode(ctx context.Context, req *llm.ReviewReques
 	if mode == probeRetryReviewLike {
 		return c.reviewProbe(ctx, req, sec, probe)
 	}
-	retryable := func(err error) bool {
-		switch mode {
-		case probeRetrySameEffort:
-			return sameEffortRetryable(err)
-		case probeRetryAnyError:
-			return anyErrorRetryable(err, probe.ReasoningEffort)
-		default:
-			return false
-		}
-	}
-	maxRetries := c.profile.MaxOutputRetries
+	retryable := probeRetryPredicate(mode, probe.ReasoningEffort)
+	maxRetries := c.probeOutputRetries()
 	for attempt := 0; ; attempt++ {
 		resp, err := c.reviewProbe(ctx, req, sec, probe)
 		if err == nil {
 			return resp, nil
 		}
-		if !retryable(err) || attempt >= maxRetries {
+		if !retryable(err) {
+			// Not this loop's to recover from, so the model layer reported it
+			// (CallerRetriesError answers for this very error) and the probe
+			// result line carries the verdict. Another line here would say the
+			// same thing twice.
 			return resp, err
 		}
-		c.logProgressFor(c.probeInfo(probe.Name, probe.ReasoningEffort), logging.StageModelCheck, logging.StateRetry, fmt.Sprintf("attempt=%d reason=%q", attempt+1, err.Error()))
+		if !model.RetriesRemaining(attempt, maxRetries) {
+			// The model layer stayed silent because this loop retries these
+			// errors; without this the probe's last word is "retry N/max" and
+			// nothing says the retries ran out.
+			c.logProgressFor(c.probeInfo(probe.Name, probe.ReasoningEffort), logging.StageModelCheck, logging.StateWarn, probeRetriesExhaustedLine(attempt, retryReason(err)))
+			return resp, err
+		}
+		c.logProgressFor(c.probeInfo(probe.Name, probe.ReasoningEffort), logging.StageModelCheck, logging.StateRetry, model.RetryLine(attempt+1, maxRetries, retryReason(err), 0))
 	}
+}
+
+// probeOutputRetries resolves the retry budget the probe loops run on.
+// MaxOutputRetries is unlimited at zero wherever it bounds a review lane, so
+// reading the same shared field as "no retries at all" here made one configured
+// zero mean two opposite things: review lanes retrying forever while the probes
+// on the same run retried nothing. The model check still bounds it: it is a pre-flight whose whole job is to reach a
+// verdict and hand the run a usable model, so a probe against a model that
+// answers invalidly every time must end in a verdict rather than spin before
+// the review it was meant to green-light. Unlimited therefore falls back to the
+// default budget, in this one documented place.
+func (c *Checker) probeOutputRetries() int {
+	if c.profile.MaxOutputRetries == 0 {
+		return config.DefaultMaxOutputRetries
+	}
+	// A negative limit is malformed rather than unlimited, and passing it
+	// through leaves RetriesRemaining to retry nothing, as it does everywhere
+	// else.
+	return c.profile.MaxOutputRetries
+}
+
+// probeRetryPredicate returns the errors reviewProbeWithMode retries in this
+// mode. The retry loop and the request's CallerRetriesError read the same
+// predicate on purpose: the errors the model layer stays silent about are then
+// exactly the ones the checker goes on to retry, and every other one keeps its
+// report.
+func probeRetryPredicate(mode probeRetryMode, effort string) func(error) bool {
+	switch mode {
+	case probeRetrySameEffort:
+		return sameEffortRetryable
+	case probeRetryAnyError:
+		return func(err error) bool { return anyErrorRetryable(err, effort) }
+	default:
+		return retriesNothing
+	}
+}
+
+// retriesNothing is the CallerRetriesError of a request whose caller runs no
+// retry loop of its own, so every error it returns is the model layer's to
+// report. Said out loud rather than left nil: an unset predicate means the
+// model layer assumes an output-retry loop it does not have, and swallows the
+// unparseable responses nothing here would feed back.
+func retriesNothing(error) bool { return false }
+
+// probeRetriesExhaustedLine renders the line a probe retry loop gives up with:
+// "reasoning loop after 5 retries", or the bare reason when it never retried.
+func probeRetriesExhaustedLine(retries int, reason string) string {
+	if retries <= 0 {
+		return reason
+	}
+	return reason + " after " + model.RetryCountLabel(retries)
+}
+
+// retryReason condenses an error into the short prose a retry progress line
+// carries. Provider errors can be multi-line and arbitrarily long, and
+// RetryLine renders the reason between the retry counter and the wait, so an
+// inlined error body would push both out of sight — and a control character in
+// it would reach the terminal verbatim, where a lone "\r" rewinds the cursor
+// over the line's own prefix. model.ClipLine handles both.
+func retryReason(err error) string {
+	if err == nil {
+		return "request failed"
+	}
+	const limit = 100
+	if msg := model.ClipLine(err.Error(), limit); msg != "" {
+		return msg
+	}
+	return "request failed"
 }
 
 func (c *Checker) logProgressFor(info logging.ProgressInfo, stage logging.Stage, state logging.State, msg string) {
@@ -672,7 +743,13 @@ func (c *Checker) jsonSchemaProbe(ctx context.Context, effort string) ProbeResul
 }
 
 func (c *Checker) retryJSONProbe(ctx context.Context, sec *logging.ReasoningSection, probe ProbeResult, req *llm.ReviewRequest, resp *llm.ReviewResponse, validationErr error) (*llm.ReviewResponse, ProbeResult) {
-	for attempt := 0; attempt < c.profile.MaxOutputRetries; attempt++ {
+	maxRetries := c.probeOutputRetries()
+	attempts := 0
+	for ; model.RetriesRemaining(attempts, maxRetries); attempts++ {
+		// Logged before the request, like reviewProbeWithMode's retry line, so
+		// "N/max" always announces a retry that is about to run rather than one
+		// that just failed with no successor.
+		c.logProgressFor(c.probeInfo(probe.Name, probe.ReasoningEffort), logging.StageModelCheck, logging.StateRetry, model.RetryLine(attempts+1, maxRetries, "invalid JSON: "+retryReason(validationErr), 0))
 		messages := append([]llm.Message(nil), req.Messages...)
 		if resp != nil && strings.TrimSpace(resp.RawResponse) != "" {
 			messages = append(messages, llm.Message{Role: "assistant", Content: resp.RawResponse})
@@ -680,6 +757,11 @@ func (c *Checker) retryJSONProbe(ctx context.Context, sec *logging.ReasoningSect
 		messages = append(messages, llm.Message{Role: "user", Content: jsonProbeRetryFeedback})
 		retryReq := *req
 		retryReq.Messages = messages
+		// This loop retries the invalid JSON it validates itself, not anything
+		// the request comes back with, so every error this call returns is the
+		// model layer's to report: inheriting the request's predicate would
+		// silence a failure nothing here retries.
+		retryReq.CallerRetriesError = retriesNothing
 		// Plain reviewProbe on purpose: this loop already owns the MaxOutputRetries
 		// budget for validation retries. Routing it through reviewProbeWithMode
 		// would nest two retry loops and multiply the request budget.
@@ -695,12 +777,15 @@ func (c *Checker) retryJSONProbe(ctx context.Context, sec *logging.ReasoningSect
 		if err := validateJSONProbeResponse(retryResp.RawResponse); err != nil {
 			validationErr = err
 			resp = retryResp
-			c.logProgressFor(c.probeInfo(probe.Name, probe.ReasoningEffort), logging.StageModelCheck, logging.StateRetry, fmt.Sprintf("json_retry=%d error=%q", attempt+1, err.Error()))
 			continue
 		}
 		probe.Status = ""
 		return retryResp, probe
 	}
+	// The model layer stays silent on invalid responses because this loop is what
+	// recovers from them, so without this the probe's last line is "retry N/max
+	// invalid JSON" and nothing says the retries ran out.
+	c.logProgressFor(c.probeInfo(probe.Name, probe.ReasoningEffort), logging.StageModelCheck, logging.StateWarn, probeRetriesExhaustedLine(attempts, "invalid JSON")+": "+retryReason(validationErr))
 	probe.Status = StatusFailed
 	probe.Error = validationErr.Error()
 	return resp, probe
@@ -723,6 +808,10 @@ func (c *Checker) baseRequest(effort string, messages []llm.Message, tools []llm
 		ReasoningEffort:                effort,
 		MaxReasoning:                   maxReasoning,
 		DisableReasoningEffortFallback: mode == probeRetrySameEffort,
+		// The same predicate reviewProbeWithMode retries on, so the model layer
+		// stays silent about the errors the checker recovers from and keeps its
+		// report of the ones it hands straight back.
+		CallerRetriesError: probeRetryPredicate(mode, effort),
 	}
 }
 

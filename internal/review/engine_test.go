@@ -5115,3 +5115,229 @@ func TestReviewWithoutToolsRetryKeepsRolesAlternatingOnEmptyRawContent(t *testin
 		}
 	}
 }
+
+// --- fixes from review round 2026-08 ---
+
+// The model layer hands an unparseable response back without calling it a
+// failure, because this loop is what normally recovers from one. When the loop
+// runs out of retries it must say so itself, or the lane's last word is
+// "retry N/max invalid JSON" and the run ends with nothing explaining it.
+func TestReviewWithoutToolsLogsGiveUpWhenOutputRetriesExhausted(t *testing.T) {
+	invalid := func() error {
+		return &llm.InvalidResponseError{RawContent: "malformed", Reason: "response is not valid JSON"}
+	}
+	llmClient := &scriptedLLM{results: []scriptedLLMResult{{err: invalid()}, {err: invalid()}}}
+	engine := nudgeTestEngine(llmClient)
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	llmReq := &llm.ReviewRequest{Model: "test-model", SchemaKind: llm.SchemaKindReview}
+	messages := []llm.Message{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "task"},
+	}
+	loopReq := agentLoopRequest{
+		AgentName:        "Test Reviewer",
+		AgentKind:        "review",
+		MaxOutputRetries: 1,
+		// The give-up line follows the retry lines' gate here as it does in the
+		// agent loop, so an agent whose retries stay off the progress stream
+		// cannot have its give-up announced from the no-tools path alone.
+		JSONRetryProgressAgentName: "Test Reviewer",
+		NoToolsMessages: func(m []llm.Message) ([]llm.Message, error) {
+			return append([]llm.Message(nil), m...), nil
+		},
+	}
+	if _, err := engine.reviewWithoutTools(context.Background(), llmReq, "review", "", messages, "", "", false, 1, nil, loopReq, newAgentLoopState(), nil); err == nil {
+		t.Fatal("expected the exhausted output retries to fail the call")
+	}
+	got := progress.String()
+	for _, want := range []string{
+		"retry 1/1 invalid JSON",
+		"warn invalid JSON after 1 retry",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+// The agents that keep their retries off the progress stream keep their give-up
+// off it too, so the two lines cannot disagree about whether a lane is quiet.
+func TestLogOutputRetriesExhaustedFollowsTheRetryLinesGate(t *testing.T) {
+	engine := NewEngine(nil, nil, retrieval.NewLocalEngine(), config.Profile{})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	engine.logOutputRetriesExhausted(context.Background(), agentLoopRequest{}, nil, 5, "invalid JSON", "invalid JSON")
+	if got := progress.String(); got != "" {
+		t.Fatalf("agent without a retry progress name logged %q", got)
+	}
+
+	engine.logOutputRetriesExhausted(context.Background(), agentLoopRequest{JSONRetryProgressAgentName: "Test Reviewer"}, nil, 5, "invalid JSON", "invalid JSON")
+	if want := "warn invalid JSON after 5 retries"; !strings.Contains(progress.String(), want) {
+		t.Fatalf("missing %q in:\n%s", want, progress.String())
+	}
+}
+
+// The invalid-tool-call retry spends the same output budget as the JSON
+// retries, so it belongs on the same counter and progress stream: a retry that
+// spends the budget silently makes the lane's visible counter skip a number,
+// and running the budget out silently is the lane going quiet.
+func TestRunAgentLoopReportsInvalidToolCallRetriesAndGiveUp(t *testing.T) {
+	// A fresh response per call: the loop filters the tool calls off the one it
+	// is given, so a shared pointer would arrive at the next turn already empty.
+	invalid := func() *llm.ReviewResponse {
+		return &llm.ReviewResponse{ToolCalls: []llm.ToolCall{{ID: "1", Name: "bogus_tool", Arguments: "{}"}}}
+	}
+	llmClient := &scriptedLLM{results: []scriptedLLMResult{{resp: invalid()}, {resp: invalid()}, {resp: invalid()}}}
+	engine := nudgeTestEngine(llmClient)
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	req := agentLoopRequest{
+		AgentName:                  "Test Reviewer",
+		AgentKind:                  "review",
+		JSONRetryProgressAgentName: "Test Reviewer",
+		MaxOutputRetries:           2,
+		Model:                      "test-model",
+		SchemaKind:                 llm.SchemaKindReview,
+		Messages: []llm.Message{
+			{Role: "system", Content: "system"},
+			{Role: "user", Content: "task"},
+		},
+		Tools: []llm.ToolDefinition{{Name: "read_file", Description: "read", Parameters: []byte(`{"type":"object"}`)}},
+	}
+	if _, err := engine.runAgentLoop(context.Background(), req); err == nil {
+		t.Fatal("expected the exhausted output retries to fail the agent")
+	}
+	got := progress.String()
+	for _, want := range []string{
+		"retry 1/2 invalid tool calls",
+		"retry 2/2 invalid tool calls",
+		"warn invalid tool calls after 2 retries",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+// A validation failure that survives the output retries ends the lane on an
+// unvalidated response, so the loop says the budget is gone rather than
+// trailing off after "retry 1/1".
+func TestRunAgentLoopLogsTheValidationGiveUp(t *testing.T) {
+	response := func() *llm.ReviewResponse {
+		return nudgeReviewResponse("final", 1, nudgeFinding("A", 1))
+	}
+	llmClient := &scriptedLLM{results: []scriptedLLMResult{{resp: response()}, {resp: response()}, {resp: response()}}}
+	engine := nudgeTestEngine(llmClient)
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	turns := 0
+	req := agentLoopRequest{
+		AgentName:                  "Test Reviewer",
+		AgentKind:                  "review",
+		JSONRetryProgressAgentName: "Test Reviewer",
+		MaxOutputRetries:           1,
+		Model:                      "test-model",
+		SchemaKind:                 llm.SchemaKindReview,
+		Messages: []llm.Message{
+			{Role: "system", Content: "system"},
+			{Role: "user", Content: "task"},
+		},
+		ValidateResponse: func(*llm.ReviewResponse) *llm.InvalidResponseError {
+			turns++
+			return &llm.InvalidResponseError{Reason: "missing overall_correctness", RawContent: "malformed"}
+		},
+	}
+	if _, err := engine.runAgentLoop(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if turns < 2 {
+		t.Fatalf("validation ran %d times, want the retry plus the exhausted turn", turns)
+	}
+	if got := strings.Count(progress.String(), "response validation failed after"); got != 1 {
+		t.Fatalf("give-up line logged %d times, want 1, in:\n%s", got, progress.String())
+	}
+}
+
+// The validation give-up runs in a branch that keeps looping, so a later turn
+// can reach it again with the same budget already gone. One exhausted budget is
+// one give-up line.
+func TestLogOutputRetriesExhaustedLogsOncePerLoop(t *testing.T) {
+	engine := NewEngine(nil, nil, retrieval.NewLocalEngine(), config.Profile{})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	req := agentLoopRequest{JSONRetryProgressAgentName: "Test Reviewer"}
+	state := newAgentLoopState()
+	engine.logOutputRetriesExhausted(context.Background(), req, state, 2, "detail", "response validation failed")
+	engine.logOutputRetriesExhausted(context.Background(), req, state, 2, "detail", "response validation failed")
+	if got := strings.Count(progress.String(), "response validation failed after 2 retries"); got != 1 {
+		t.Fatalf("give-up line logged %d times, want 1, in:\n%s", got, progress.String())
+	}
+
+	// A loop that ends with the line has nothing to repeat, so it needs no
+	// state to pass.
+	progress.Reset()
+	engine.logOutputRetriesExhausted(context.Background(), req, nil, 2, "detail", "invalid JSON")
+	if want := "warn invalid JSON after 2 retries"; !strings.Contains(progress.String(), want) {
+		t.Fatalf("missing %q in:\n%s", want, progress.String())
+	}
+}
+
+// The no-tools fallback runs its own retry budget, and its retry lines print
+// whatever the agent loop already spent on the shared one. Sharing the loop's
+// once-per-budget guard would swallow this loop's give-up and leave those lines
+// trailing off — the silent exit the give-up exists to prevent.
+func TestReviewWithoutToolsGiveUpSurvivesAnEarlierLoopGiveUp(t *testing.T) {
+	invalid := func() error {
+		return &llm.InvalidResponseError{RawContent: "malformed", Reason: "response is not valid JSON"}
+	}
+	llmClient := &scriptedLLM{results: []scriptedLLMResult{{err: invalid()}, {err: invalid()}}}
+	engine := nudgeTestEngine(llmClient)
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	llmReq := &llm.ReviewRequest{Model: "test-model", SchemaKind: llm.SchemaKindReview}
+	messages := []llm.Message{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "task"},
+	}
+	loopReq := agentLoopRequest{
+		AgentName:                  "Test Reviewer",
+		AgentKind:                  "review",
+		MaxOutputRetries:           1,
+		JSONRetryProgressAgentName: "Test Reviewer",
+		NoToolsMessages: func(m []llm.Message) ([]llm.Message, error) {
+			return append([]llm.Message(nil), m...), nil
+		},
+	}
+	// An earlier turn of the agent loop already gave up on the shared budget.
+	state := newAgentLoopState()
+	state.outputRetriesExhaustedLogged = true
+
+	if _, err := engine.reviewWithoutTools(context.Background(), llmReq, "review", "", messages, "", "", false, 1, nil, loopReq, state, nil); err == nil {
+		t.Fatal("expected the exhausted output retries to fail the call")
+	}
+	got := progress.String()
+	for _, want := range []string{"retry 1/1 invalid JSON", "warn invalid JSON after 1 retry"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}

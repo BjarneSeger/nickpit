@@ -838,3 +838,148 @@ func TestToolsJSONSchemaProbeSkippedWhenPrerequisiteFails(t *testing.T) {
 		t.Fatalf("summary.ToolsJSONSchema = %v, want nil for skipped probe", summary.ToolsJSONSchema)
 	}
 }
+
+// --- fixes from review round 2026-08 ---
+
+// A retry line renders the reason verbatim, so a control character in a provider
+// error reaches the terminal: a lone "\r" rewinds the cursor over the line's own
+// prefix and an escape sequence outlives the line it arrived in.
+func TestRetryReasonSanitizesProviderText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil error", nil, "request failed"},
+		{"multi-line", errors.New("upstream failed\ndetail: nope"), "upstream failed detail: nope"},
+		{"carriage return only", errors.New("upstream failed\rrewound"), "upstream failed rewound"},
+		{"escape sequence", errors.New("upstream \x1b[31mfailed"), "upstream [31mfailed"},
+		{"blank", errors.New(" \n "), "request failed"},
+		{"clipped", errors.New(strings.Repeat("x", 120)), strings.Repeat("x", 97) + "..."},
+	} {
+		if got := retryReason(tc.err); got != tc.want {
+			t.Fatalf("%s: retryReason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The retrying probe modes recover from nearly every error, so the model layer
+// must not warn about the failures the checker retries; what a probe ended up as
+// is what its status reports.
+func TestBaseRequestLetsTheCheckerReportRetriedFailures(t *testing.T) {
+	checker := New(&scriptedClient{}, config.Profile{Model: "model", ReasoningEffort: "high"})
+	// A retryable transport failure: the modes that retry it must claim it, and
+	// the mode that runs no retry loop must leave it to the model layer.
+	retried := errors.New("boom")
+	for _, tc := range []struct {
+		mode probeRetryMode
+		want bool
+	}{
+		{probeRetryAnyError, true},
+		{probeRetrySameEffort, false},
+		{probeRetryReviewLike, false},
+	} {
+		req := checker.baseRequest("high", nil, nil, tc.mode)
+		if req.CallerRetriesError == nil {
+			t.Fatalf("mode %d: CallerRetriesError is nil, which leaves the model layer assuming a retry loop", tc.mode)
+		}
+		if got := req.CallerRetriesError(retried); got != tc.want {
+			t.Fatalf("mode %d: CallerRetriesError(%v) = %v, want %v", tc.mode, retried, got, tc.want)
+		}
+	}
+}
+
+// The model layer stays silent about the errors this loop retries, so when the
+// loop runs out the probe's last word would be "retry N/max" with nothing
+// saying the retries ran out.
+func TestReviewProbeWithModeLogsGiveUpWhenRetriesRunOut(t *testing.T) {
+	client := &scriptedClient{responses: []scriptedResponse{
+		{err: errors.New("boom 1")},
+		{err: errors.New("boom 2")},
+		{err: errors.New("boom 3")},
+	}}
+	checker := New(client, config.Profile{Model: "model", ReasoningEffort: "high", MaxOutputRetries: 2, MaxOutputRetriesConfigured: true})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	checker.SetLogger(logger)
+
+	probe := ProbeResult{Name: "configured_json_schema", ReasoningEffort: "high"}
+	req := checker.baseRequest("high", nil, nil, probeRetryAnyError)
+	if _, err := checker.reviewProbeWithMode(context.Background(), req, nil, probe, probeRetryAnyError); err == nil {
+		t.Fatal("expected the exhausted retries to fail the probe")
+	}
+	got := progress.String()
+	for _, want := range []string{"retry 1/2 boom 1", "retry 2/2 boom 2", "warn boom 3 after 2 retries"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+// An error this loop does not retry is reported by the model layer, which the
+// request's CallerRetriesError leaves free to do exactly for those errors, and
+// by the probe result line. A third line here would say it twice.
+func TestReviewProbeWithModeLeavesUnretriedErrorsToTheModelLayer(t *testing.T) {
+	client := &scriptedClient{responses: []scriptedResponse{{err: context.Canceled}}}
+	checker := New(client, config.Profile{Model: "model", ReasoningEffort: "high", MaxOutputRetries: 2, MaxOutputRetriesConfigured: true})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	checker.SetLogger(logger)
+
+	probe := ProbeResult{Name: "configured_json_schema", ReasoningEffort: "high"}
+	req := checker.baseRequest("high", nil, nil, probeRetryAnyError)
+	if _, err := checker.reviewProbeWithMode(context.Background(), req, nil, probe, probeRetryAnyError); err == nil {
+		t.Fatal("expected the canceled probe to fail")
+	}
+	if got := progress.String(); strings.Contains(got, "warn") || strings.Contains(got, "retry") {
+		t.Fatalf("unretried error logged a retry or give-up line in:\n%s", got)
+	}
+	if req.CallerRetriesError == nil || req.CallerRetriesError(context.Canceled) {
+		t.Fatal("CallerRetriesError promised a retry the probe loop does not make")
+	}
+}
+
+// MaxOutputRetries is unlimited at zero wherever it bounds a review lane, and
+// reading it as "no retries at all" here left a configured zero retrying
+// forever in one place and not at all in another. The model check bounds it
+// instead of taking the zero literally.
+func TestProbeOutputRetriesBoundsAnUnlimitedBudget(t *testing.T) {
+	unlimited := New(&scriptedClient{}, config.Profile{Model: "model", MaxOutputRetries: 0, MaxOutputRetriesConfigured: true})
+	if got := unlimited.probeOutputRetries(); got != config.DefaultMaxOutputRetries {
+		t.Fatalf("probeOutputRetries() = %d, want the default budget %d", got, config.DefaultMaxOutputRetries)
+	}
+	configured := New(&scriptedClient{}, config.Profile{Model: "model", MaxOutputRetries: 3, MaxOutputRetriesConfigured: true})
+	if got := configured.probeOutputRetries(); got != 3 {
+		t.Fatalf("probeOutputRetries() = %d, want 3", got)
+	}
+}
+
+// The JSON retry loop retries the invalid JSON it validates itself, not what
+// the request comes back with. Inheriting the probe's predicate would silence a
+// failure nothing in this loop retries, and leaving it nil would silence an
+// unparseable response the same way.
+func TestRetryJSONProbeLeavesRequestFailuresToTheModelLayer(t *testing.T) {
+	client := &scriptedClient{responses: []scriptedResponse{{err: errors.New("boom")}}}
+	checker := New(client, config.Profile{Model: "model", ReasoningEffort: "high", MaxOutputRetries: 2, MaxOutputRetriesConfigured: true})
+
+	probe := ProbeResult{Name: "configured_json_schema", ReasoningEffort: "high"}
+	req := checker.baseRequest("high", nil, nil, probeRetryAnyError)
+	_, probe = checker.retryJSONProbe(context.Background(), nil, probe, req, nil, errors.New("unexpected end of JSON input"))
+	if probe.Status != StatusFailed {
+		t.Fatalf("probe status = %q, want %q", probe.Status, StatusFailed)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("requests = %d, want the single retry", len(client.reqs))
+	}
+	retried := client.reqs[0].CallerRetriesError
+	if retried == nil {
+		t.Fatal("retry request left CallerRetriesError nil, which silences unparseable responses nothing here retries")
+	}
+	for _, err := range []error{errors.New("boom"), &llm.InvalidResponseError{Reason: "not JSON"}} {
+		if retried(err) {
+			t.Fatalf("retry request claimed it retries %v", err)
+		}
+	}
+}
