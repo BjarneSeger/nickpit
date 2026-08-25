@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"slices"
+
+	"github.com/dgrieser/nickpit/internal/model"
 )
 
 func ResolveProfile(cfg *Config, name string) (Profile, error) {
@@ -22,7 +24,7 @@ func mergeProfiles(base, override Profile) Profile {
 	}
 	base.Small = mergeSmallModelConfig(base.Small, override.Small)
 	if override.BaseURL != "" {
-		base.BaseURL = override.BaseURL
+		overrideProfileBaseURL(&base, override.BaseURL)
 	}
 	if override.APIKeyConfigured {
 		base.APIKeyConfigured = true
@@ -181,4 +183,14 @@ func mergeProfiles(base, override Profile) Profile {
 		base.AssetBaseURL = override.AssetBaseURL
 	}
 	return base
+}
+
+// overrideProfileBaseURL keeps pre-declared model capabilities tied to the
+// endpoint they describe. A different endpoint must be probed or provide its
+// own declarations instead of inheriting capabilities by model name alone.
+func overrideProfileBaseURL(profile *Profile, baseURL string) {
+	if !model.SameEndpoint(profile.BaseURL, baseURL) {
+		profile.SupportedModels = nil
+	}
+	profile.BaseURL = baseURL
 }

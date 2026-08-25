@@ -1064,6 +1064,79 @@ profiles:
 	}
 }
 
+func TestLoadConfigScopesSupportedModelsToEndpoint(t *testing.T) {
+	const replacementURL = "https://replacement.invalid/v1"
+	tests := []struct {
+		name      string
+		config    string
+		envURL    string
+		overrides Overrides
+		wantCount int
+	}{
+		{
+			name: "same-name config override",
+			config: `
+profiles:
+  mittwald:
+    base_url: https://replacement.invalid/v1
+`,
+		},
+		{
+			name:   "environment override",
+			envURL: replacementURL,
+		},
+		{
+			name:      "CLI override",
+			overrides: Overrides{BaseURL: replacementURL},
+		},
+		{
+			name: "config override with replacement declarations",
+			config: `
+profiles:
+  mittwald:
+    base_url: https://replacement.invalid/v1
+    supported_models:
+      - model: replacement-model
+        compatible: true
+`,
+			wantCount: 1,
+		},
+		{
+			name: "normalized same endpoint",
+			config: `
+profiles:
+  mittwald:
+    base_url: https://llm.aihosting.mittwald.de/v1/
+`,
+			wantCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := ""
+			if tt.config != "" {
+				path = filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(tt.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.envURL != "" {
+				t.Setenv("NICKPIT_BASE_URL", tt.envURL)
+			}
+			tt.overrides.Profile = "mittwald"
+
+			_, profile, err := Load(path, tt.overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(profile.SupportedModels) != tt.wantCount {
+				t.Fatalf("supported models = %#v, want %d entries", profile.SupportedModels, tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestCloneProfileCopiesSupportedModels(t *testing.T) {
 	jsonSchema := true
 	profile := Profile{SupportedModels: []ModelCapabilities{{

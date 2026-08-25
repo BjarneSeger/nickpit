@@ -792,7 +792,7 @@ func applyEnv(cfg *Config, profileName string) error {
 		profile.Small.ExtraBody = extraBody
 	}
 	if value := os.Getenv("NICKPIT_BASE_URL"); value != "" {
-		profile.BaseURL = value
+		overrideProfileBaseURL(&profile, value)
 	}
 	if value := os.Getenv("NICKPIT_WORKDIR"); value != "" {
 		profile.Workdir = value
@@ -867,7 +867,7 @@ func applyOverrides(profile Profile, overrides Overrides) (Profile, error) {
 	}
 	profile.Small = mergeSmallModelConfig(profile.Small, overrides.Small)
 	if overrides.BaseURL != "" {
-		profile.BaseURL = overrides.BaseURL
+		overrideProfileBaseURL(&profile, overrides.BaseURL)
 	}
 	if overrides.APIKey != "" {
 		profile.APIKey = overrides.APIKey
