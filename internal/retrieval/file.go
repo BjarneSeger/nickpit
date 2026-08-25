@@ -33,6 +33,19 @@ func (e *LocalEngine) GetFile(_ context.Context, repoRoot, path string) (*FileCo
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: reading %s: %w", path, err)
 	}
+	// A symlink's whole content is its target path, and it is returned byte for
+	// byte: git appends no separator and a pathname may legally contain — or end
+	// in — a newline or a carriage return, so the line-ending normalization every
+	// other file gets would silently rewrite the target. A reviewer judging
+	// whether the link still resolves must see the pathname that is actually
+	// stored, not a tidied one.
+	if target, ok := repofs.LinkTarget(repoRoot, fullPath); ok {
+		return &FileContent{
+			Path:     normalizedPath,
+			Content:  target,
+			Language: detectLanguage(normalizedPath),
+		}, nil
+	}
 	data, truncated, err := readFileCapped(repoRoot, fullPath, toollimits.MaxRetrievedFileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: reading %s: %w", normalizedPath, err)
@@ -54,9 +67,11 @@ func (e *LocalEngine) GetFile(_ context.Context, repoRoot, path string) (*FileCo
 // file's text. Following it would attribute another file's lines to the link's
 // own path — the reviewer would see hundreds of lines of unrelated source under
 // a path whose real content is one pathname, and every line number cited for it
-// would be wrong.
+// would be wrong. Callers that must preserve the target's exact bytes read the
+// link themselves (see GetFile); the line-oriented callers of this function
+// normalize a link's target like any other text, because they match lines.
 func readFileCapped(repoRoot, fullPath string, limit int) ([]byte, bool, error) {
-	if target, ok := repofs.LinkTarget(fullPath); ok {
+	if target, ok := repofs.LinkTarget(repoRoot, fullPath); ok {
 		return []byte(target), false, nil
 	}
 	f, err := repofs.Open(repoRoot, fullPath)
@@ -151,19 +166,12 @@ func (e *LocalEngine) GetFileSlice(_ context.Context, repoRoot, path string, sta
 	if end > 0 && end < start {
 		return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, end)
 	}
-	// A symlink is its target path, so the whole file is line 1 (see
-	// readFileCapped); any range that starts past it selects nothing.
-	if target, ok := repofs.LinkTarget(fullPath); ok {
-		if start > 1 {
-			return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, 1)
-		}
-		return &FileSlice{
-			Path:      normalizedPath,
-			StartLine: 1,
-			EndLine:   1,
-			Content:   normalizeText(target),
-			Language:  detectLanguage(normalizedPath),
-		}, nil
+	// A symlink is its target path (see readFileCapped). Almost always that is one
+	// line, but a pathname may legally contain a newline, and git then renders the
+	// blob as several diff lines — so the target is split and counted like any
+	// other file rather than forced into line 1.
+	if target, ok := repofs.LinkTarget(repoRoot, fullPath); ok {
+		return linkTargetSlice(normalizedPath, target, start, end)
 	}
 	f, err := repofs.Open(repoRoot, fullPath)
 	if err != nil {
@@ -220,6 +228,28 @@ func (e *LocalEngine) GetFileSlice(_ context.Context, repoRoot, path string, sta
 		Content:   strings.Join(selected, "\n"),
 		Language:  detectLanguage(normalizedPath),
 		Truncated: truncated,
+	}, nil
+}
+
+// linkTargetSlice answers a line range out of a symlink's target. The target is
+// split exactly as git counts the blob's lines, so the returned range metadata
+// and the returned content describe the same lines.
+func linkTargetSlice(normalizedPath, target string, start, end int) (*FileSlice, error) {
+	lines := splitLines(target)
+	if start > len(lines) {
+		return nil, fmt.Errorf("retrieval: invalid line range %d-%d", start, len(lines))
+	}
+	last := len(lines)
+	if end > 0 && end < last {
+		last = end
+	}
+	return &FileSlice{
+		Path:      normalizedPath,
+		StartLine: start,
+		EndLine:   last,
+		Content:   strings.Join(lines[start-1:last], "\n"),
+		Language:  detectLanguage(normalizedPath),
+		Truncated: end > 0 && last < end,
 	}, nil
 }
 

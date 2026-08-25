@@ -134,15 +134,25 @@ func codeLocationOverlapsAllowed(loc model.CodeLocation, allowed []model.CodeLoc
 }
 
 // allowedPathMatches reports whether a model-supplied file path designates the same
-// file as an allowed location's git path. Both sides are cleaned of the noise a
-// payload may carry (surrounding whitespace, a "./" prefix, a doubled segment);
-// only the finding's side is additionally tried with separators folded, because a
-// model may spell one loosely. Folding both sides would merge distinct legal names
-// — a symlink `a\b` and a regular file `a/b` — and let one file's scope authorize
-// a finding about the other.
+// file as an allowed location's git path.
+//
+// The candidate is the authoritative path and keeps its spelling: only segments a
+// git tree cannot contain are cleaned off it (see cleanGitPath), never whitespace
+// and never a separator, because " foo" and "foo" — like `a\b` and `a/b` — are two
+// different files, and folding them would let one file's scope authorize a finding
+// about the other. Cosmetic cleanup is the finding side's alone: a model may trim
+// or pad whitespace, prefix "./", or spell a separator loosely. An exact match is
+// tried first, so a finding that names a whitespace-bearing file literally still
+// matches it.
 func allowedPathMatches(findingPath, candidatePath string) bool {
+	if findingPath == candidatePath {
+		return true
+	}
 	candidate := cleanGitPath(candidatePath)
-	if cleanGitPath(findingPath) == candidate {
+	if candidate == "" {
+		return false
+	}
+	if cleanGitPath(strings.TrimSpace(findingPath)) == candidate {
 		return true
 	}
 	return normalizeReviewPath(findingPath) == candidate

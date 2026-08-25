@@ -887,6 +887,65 @@ func TestLocalEngineGetFileSliceReachesLinesBeyondByteCap(t *testing.T) {
 	}
 }
 
+// lstat and readlink resolve every component but the last, so a link reached
+// THROUGH an escaping directory link lives outside the checkout — reading it would
+// report a target from a tree the repository does not contain.
+func TestLocalEngineRejectsLinksBehindAnEscapingParent(t *testing.T) {
+	repoRoot := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink("/etc/shadow", filepath.Join(outside, "secret-link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repoRoot, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewLocalEngine()
+
+	if got, err := engine.GetFile(context.Background(), repoRoot, "escape/secret-link"); err == nil {
+		t.Fatalf("read a link outside the repo: %#v", got)
+	}
+	if got, err := engine.GetFileSlice(context.Background(), repoRoot, "escape/secret-link", 1, 1); err == nil {
+		t.Fatalf("sliced a link outside the repo: %#v", got)
+	}
+}
+
+// A pathname may legally contain — or end in — a newline or a carriage return, and
+// a symlink's content IS that pathname. Normalizing it would hand the reviewer a
+// target that is not the one stored, and slicing it must count the lines git
+// counts, or the returned range and the returned content disagree.
+func TestLocalEngineKeepsLinkTargetBytesExact(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := "dir/odd\r\nname\n"
+	if err := os.Symlink(target, filepath.Join(repoRoot, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	engine := NewLocalEngine()
+
+	got, err := engine.GetFile(context.Background(), repoRoot, "link")
+	if err != nil || got.Content != target {
+		t.Fatalf("link content = %q, %v, want the target byte for byte", got.Content, err)
+	}
+	// git renders that blob as two lines ("dir/odd\r" and "name"), so both are
+	// reachable and the reported range matches the returned content.
+	second, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Content != "name" || second.StartLine != 2 || second.EndLine != 2 {
+		t.Fatalf("second line = %#v, want the target's second line", second)
+	}
+	whole, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.EndLine != 2 {
+		t.Fatalf("slice range = %d-%d, want both lines", whole.StartLine, whole.EndLine)
+	}
+	if _, err := engine.GetFileSlice(context.Background(), repoRoot, "link", 3, 3); err == nil {
+		t.Fatal("a range past the target returned a slice")
+	}
+}
+
 // A symlink is read AS a symlink: its content is the target path. Following it
 // would attribute the target file's text to the link's own path — wrong content
 // under a reviewed path, wrong line numbers for every finding about it — and for

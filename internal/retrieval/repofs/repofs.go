@@ -115,7 +115,16 @@ func evalSymlinksDeepest(path string) (string, error) {
 // own path. With core.symlinks=false git materializes the blob as a regular file
 // holding the target, so there the same bytes arrive through the ordinary read
 // path instead.
-func LinkTarget(fullPath string) (string, bool) {
+//
+// The parent directory is checked first, because lstat and readlink resolve every
+// component BUT the last: with `escape -> /outside` inside the checkout,
+// "escape/secret-link" would otherwise report a link that lives outside the
+// repository entirely. A parent that escapes reports false, which leaves the
+// caller on its ordinary read path — where Open rejects the same escape.
+func LinkTarget(repoRoot, fullPath string) (string, bool) {
+	if err := VerifyNoSymlinkEscape(repoRoot, filepath.Dir(fullPath)); err != nil {
+		return "", false
+	}
 	info, err := os.Lstat(fullPath)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return "", false

@@ -183,14 +183,13 @@ func collectFilterCandidatePaths(ctx *model.ReviewContext) []string {
 	return paths
 }
 
-// cleanGitPath tidies a literal git path without touching its separators: the
-// spelling stays the file's own, only noise a payload may add (surrounding
-// whitespace, a "./" prefix, a doubled or dot segment) is removed. It is what
-// makes a literal path comparable to a normalized one — see allowedPathMatches —
-// where normalizeReviewPath cannot be used because folding "\\" into "/" would
-// merge a symlink named `a\b` with a regular file `a/b`.
+// cleanGitPath removes from a path only what cannot be part of a git filename: a
+// "./" prefix, an empty or "." segment. Git trees hold no empty and no ".."
+// component, so this can never merge two distinct legal names. Whitespace and
+// separators are left alone — " foo" and "foo" are two different files, and so
+// are `a\b` and `a/b` — which is why neither TrimSpace nor normalizeReviewPath
+// may be applied to an authoritative git path. See allowedPathMatches.
 func cleanGitPath(value string) string {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
 	}

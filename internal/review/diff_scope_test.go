@@ -293,14 +293,28 @@ func TestCodeLocationOverlapsAllowedCleansTheCandidateSide(t *testing.T) {
 	if got := allowedPathFor(allowed, "dir/x.go"); got != "./dir//x.go" {
 		t.Fatalf("allowedPathFor = %q, want git's own spelling of the path", got)
 	}
+	// Whitespace is part of a git filename, so it is never trimmed off the
+	// authoritative side: " foo" and "foo" are two different files.
+	padded := []model.CodeLocation{
+		{FilePath: " foo", LineRange: model.LineRange{Start: 1, End: 1, Count: 1}},
+	}
+	trimmed := model.CodeLocation{FilePath: "foo", LineRange: model.LineRange{Start: 1, End: 1, Count: 1}}
+	if codeLocationOverlapsAllowed(trimmed, padded) {
+		t.Fatal(`a finding on "foo" was authorized by the location of " foo"`)
+	}
+	// The whitespace-named file itself stays reviewable.
+	literal := model.CodeLocation{FilePath: " foo", LineRange: model.LineRange{Start: 1, End: 1, Count: 1}}
+	if !codeLocationOverlapsAllowed(literal, padded) {
+		t.Fatal("the whitespace-named file is out of scope for its own finding")
+	}
 	// Separators are still not folded on the candidate side: `a\b` and `a/b` are
 	// two different files on Unix, and one must not authorize the other.
 	separators := []model.CodeLocation{
-		{FilePath: `a`, LineRange: model.LineRange{Start: 1, End: 1, Count: 1}},
+		{FilePath: `a\b`, LineRange: model.LineRange{Start: 1, End: 1, Count: 1}},
 	}
 	other := model.CodeLocation{FilePath: "a/b", LineRange: model.LineRange{Start: 1, End: 1, Count: 1}}
 	if codeLocationOverlapsAllowed(other, separators) {
-		t.Fatal("a finding on a/b was authorized by the location of a\\b")
+		t.Fatal(`a finding on a/b was authorized by the location of a\b`)
 	}
 }
 
