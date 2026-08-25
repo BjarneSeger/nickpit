@@ -5950,3 +5950,57 @@ func TestClientReviewNonRetryableStatusReportsTheProviderMessage(t *testing.T) {
 		}
 	}
 }
+
+// The transport's own ResponseHeaderTimeout produces a deadline error while the
+// caller's context is still alive — a stalled provider, which is exactly the
+// lane that needs an outcome line. Only a context the caller ended silences it.
+func TestLogRetryOutcomeReportsATimeoutTheCallerDidNotAskFor(t *testing.T) {
+	client := NewOpenAIClient("http://example.invalid", "token", "model")
+	var logs bytes.Buffer
+	logger := logging.New(&logs, false, false)
+	logger.SetShowProgress(true)
+	client.SetLogger(logger)
+
+	stalled := fmt.Errorf("llm: request failed: %w", context.DeadlineExceeded)
+	progress := retryProgress{failure: "network error"}
+	client.logRetryOutcome(context.Background(), &progress, stalled, nil)
+	if want := "Model      warn network error"; !strings.Contains(logs.String(), want) {
+		t.Fatalf("missing %q in:\n%s", want, logs.String())
+	}
+
+	// The same error, once the caller's own context is the reason it arrived.
+	logs.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client.logRetryOutcome(ctx, &progress, stalled, nil)
+	if got := logs.String(); got != "" {
+		t.Fatalf("deliberately ended call logged %q", got)
+	}
+}
+
+// An unparseable response is suppressed on the assumption that the caller feeds
+// it back to the model. A caller that says it retries nothing has no such loop,
+// so the failure is the model layer's to report.
+func TestLogRetryOutcomeReportsInvalidResponsesNoOneRetries(t *testing.T) {
+	client := NewOpenAIClient("http://example.invalid", "token", "model")
+	var logs bytes.Buffer
+	logger := logging.New(&logs, false, false)
+	logger.SetShowProgress(true)
+	client.SetLogger(logger)
+
+	invalid := &InvalidResponseError{Reason: "response is not valid JSON"}
+	progress := retryProgress{failure: "invalid response"}
+
+	// No predicate: the caller is assumed to own an output-retry loop.
+	client.logRetryOutcome(context.Background(), &progress, invalid, nil)
+	if got := logs.String(); got != "" {
+		t.Fatalf("invalid response the caller retries logged %q", got)
+	}
+
+	logs.Reset()
+	retriesNothing := func(error) bool { return false }
+	client.logRetryOutcome(context.Background(), &progress, invalid, retriesNothing)
+	if want := "Model      warn invalid response"; !strings.Contains(logs.String(), want) {
+		t.Fatalf("missing %q in:\n%s", want, logs.String())
+	}
+}

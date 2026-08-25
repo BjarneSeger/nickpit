@@ -868,17 +868,23 @@ func TestRetryReasonSanitizesProviderText(t *testing.T) {
 // is what its status reports.
 func TestBaseRequestLetsTheCheckerReportRetriedFailures(t *testing.T) {
 	checker := New(&scriptedClient{}, config.Profile{Model: "model", ReasoningEffort: "high"})
+	// A retryable transport failure: the modes that retry it must claim it, and
+	// the mode that runs no retry loop must leave it to the model layer.
+	retried := errors.New("boom")
 	for _, tc := range []struct {
 		mode probeRetryMode
 		want bool
 	}{
 		{probeRetryAnyError, true},
-		{probeRetrySameEffort, true},
+		{probeRetrySameEffort, false},
 		{probeRetryReviewLike, false},
 	} {
 		req := checker.baseRequest("high", nil, nil, tc.mode)
-		if got := req.CallerRetriesError != nil; got != tc.want {
-			t.Fatalf("mode %d: CallerRetriesError set = %v, want %v", tc.mode, got, tc.want)
+		if req.CallerRetriesError == nil {
+			t.Fatalf("mode %d: CallerRetriesError is nil, which leaves the model layer assuming a retry loop", tc.mode)
+		}
+		if got := req.CallerRetriesError(retried); got != tc.want {
+			t.Fatalf("mode %d: CallerRetriesError(%v) = %v, want %v", tc.mode, retried, got, tc.want)
 		}
 	}
 }
@@ -947,5 +953,33 @@ func TestProbeOutputRetriesBoundsAnUnlimitedBudget(t *testing.T) {
 	configured := New(&scriptedClient{}, config.Profile{Model: "model", MaxOutputRetries: 3, MaxOutputRetriesConfigured: true})
 	if got := configured.probeOutputRetries(); got != 3 {
 		t.Fatalf("probeOutputRetries() = %d, want 3", got)
+	}
+}
+
+// The JSON retry loop retries the invalid JSON it validates itself, not what
+// the request comes back with. Inheriting the probe's predicate would silence a
+// failure nothing in this loop retries, and leaving it nil would silence an
+// unparseable response the same way.
+func TestRetryJSONProbeLeavesRequestFailuresToTheModelLayer(t *testing.T) {
+	client := &scriptedClient{responses: []scriptedResponse{{err: errors.New("boom")}}}
+	checker := New(client, config.Profile{Model: "model", ReasoningEffort: "high", MaxOutputRetries: 2, MaxOutputRetriesConfigured: true})
+
+	probe := ProbeResult{Name: "configured_json_schema", ReasoningEffort: "high"}
+	req := checker.baseRequest("high", nil, nil, probeRetryAnyError)
+	_, probe = checker.retryJSONProbe(context.Background(), nil, probe, req, nil, errors.New("unexpected end of JSON input"))
+	if probe.Status != StatusFailed {
+		t.Fatalf("probe status = %q, want %q", probe.Status, StatusFailed)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("requests = %d, want the single retry", len(client.reqs))
+	}
+	retried := client.reqs[0].CallerRetriesError
+	if retried == nil {
+		t.Fatal("retry request left CallerRetriesError nil, which silences unparseable responses nothing here retries")
+	}
+	for _, err := range []error{errors.New("boom"), &llm.InvalidResponseError{Reason: "not JSON"}} {
+		if retried(err) {
+			t.Fatalf("retry request claimed it retries %v", err)
+		}
 	}
 }

@@ -159,11 +159,17 @@ type ReviewRequest struct {
 	// goes on to recover from as if the run had gone wrong — while every error
 	// the caller will not retry stays Review's to report, so no exit is left
 	// unexplained. Recovery inside the call is always reported, since nothing
-	// else knows about it. A nil predicate means the caller retries nothing.
+	// else knows about it.
 	//
 	// It takes the error rather than a flag because a caller that retries only
 	// some errors would otherwise silence the rest: the ones it hands straight
 	// back are exactly the ones nothing else would report.
+	//
+	// When set, it answers for every error, unparseable responses included. When
+	// unset, Review falls back to assuming the caller runs an output-retry loop
+	// for those (every review lane does) and reports everything else. A caller
+	// that retries nothing therefore says so with a predicate that always
+	// returns false rather than by leaving this nil.
 	CallerRetriesError func(error) bool
 }
 
@@ -2089,8 +2095,8 @@ func httpFailureReason(status int, message string) string {
 // The failure line is a warning, not an error: the returned error is what
 // reports a failed run, while this line only explains a lane that went quiet.
 // Deliberate cancellation (Ctrl-C, an expired lane time budget) is not a model
-// failure at all and stays silent, and neither is an invalid response or a
-// failure the caller's own retry loop is about to retry.
+// failure at all and stays silent, and neither is a failure the caller's own
+// retry loop is about to retry.
 //
 // A nil progress reports nothing, the way recordRetry and recordFailure record
 // nothing, so tracking retries stays optional for a caller of reviewLadder.
@@ -2104,32 +2110,35 @@ func (c *OpenAIClient) logRetryOutcome(ctx context.Context, progress *retryProgr
 		}
 		return
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return
-	}
-	// A request context that is already done means the call was cut short on
+	// The request context, not the error, is what says a call was cut short on
 	// purpose — Ctrl-C, or a caller's soft deadline that expires mid-stream to
-	// re-issue the request urgently — and the transport error a severed stream
-	// surfaces (an aborted read, an unexpected EOF) rarely carries the context
-	// cause the check above matches on. Without this, a lane that recovers on
-	// the very next call is announced as a model failure.
+	// re-issue the request urgently. Reading it off the error instead cut both
+	// ways: a severed stream surfaces as an aborted read or an unexpected EOF
+	// that carries no context cause, while the transport's own
+	// ResponseHeaderTimeout can produce a deadline error with the caller's
+	// context still very much alive — a stalled provider, and exactly the lane
+	// that needs the line.
 	if ctx.Err() != nil {
 		return
 	}
 	// The caller retries this error and reports the outcome of its own loop, so
-	// warning here would announce a failure it is about to recover from.
-	if callerRetries != nil && callerRetries(err) {
-		return
-	}
-	// An unparseable or incomplete response is returned to the caller for its
-	// output-retry loop to feed back to the model, which usually succeeds on the
-	// next call. Warning here would report the routine hiccup those loops exist
-	// to absorb as a failure, and the loop logs its own retry line either way;
-	// when it does run out of retries, that loop logs the give-up line, because
-	// only it knows its own budget is gone.
-	var invalidResp *InvalidResponseError
-	if errors.As(err, &invalidResp) {
-		return
+	// warning here would announce a failure it is about to recover from. A
+	// caller that set the predicate has answered for this error either way.
+	if callerRetries != nil {
+		if callerRetries(err) {
+			return
+		}
+	} else {
+		// No predicate: an unparseable or incomplete response is assumed to go
+		// back to the caller's output-retry loop, which feeds it to the model
+		// again and usually succeeds. Warning would report the routine hiccup
+		// those loops exist to absorb as a failure, and the loop logs its own
+		// retry line either way; when it runs out of retries, that loop logs
+		// the give-up line, because only it knows its own budget is gone.
+		var invalidResp *InvalidResponseError
+		if errors.As(err, &invalidResp) {
+			return
+		}
 	}
 	reason := progress.failure
 	if reason == "" {

@@ -293,7 +293,7 @@ func (c *Checker) reviewProbeWithMode(ctx context.Context, req *llm.ReviewReques
 		if err == nil {
 			return resp, nil
 		}
-		if retryable == nil || !retryable(err) {
+		if !retryable(err) {
 			// Not this loop's to recover from, so the model layer reported it
 			// (CallerRetriesError answers for this very error) and the probe
 			// result line carries the verdict. Another line here would say the
@@ -331,10 +331,10 @@ func (c *Checker) probeOutputRetries() int {
 }
 
 // probeRetryPredicate returns the errors reviewProbeWithMode retries in this
-// mode, or nil for a mode that runs no retry loop of its own. The retry loop
-// and the request's CallerRetriesError read the same predicate on purpose: the
-// errors the model layer stays silent about are then exactly the ones the
-// checker goes on to retry, and every other one keeps its report.
+// mode. The retry loop and the request's CallerRetriesError read the same
+// predicate on purpose: the errors the model layer stays silent about are then
+// exactly the ones the checker goes on to retry, and every other one keeps its
+// report.
 func probeRetryPredicate(mode probeRetryMode, effort string) func(error) bool {
 	switch mode {
 	case probeRetrySameEffort:
@@ -342,9 +342,16 @@ func probeRetryPredicate(mode probeRetryMode, effort string) func(error) bool {
 	case probeRetryAnyError:
 		return func(err error) bool { return anyErrorRetryable(err, effort) }
 	default:
-		return nil
+		return retriesNothing
 	}
 }
+
+// retriesNothing is the CallerRetriesError of a request whose caller runs no
+// retry loop of its own, so every error it returns is the model layer's to
+// report. Said out loud rather than left nil: an unset predicate means the
+// model layer assumes an output-retry loop it does not have, and swallows the
+// unparseable responses nothing here would feed back.
+func retriesNothing(error) bool { return false }
 
 // probeRetriesExhaustedLine renders the line a probe retry loop gives up with:
 // "reasoning loop after 5 retries", or the bare reason when it never retried.
@@ -750,10 +757,11 @@ func (c *Checker) retryJSONProbe(ctx context.Context, sec *logging.ReasoningSect
 		messages = append(messages, llm.Message{Role: "user", Content: jsonProbeRetryFeedback})
 		retryReq := *req
 		retryReq.Messages = messages
-		// This loop retries invalid JSON, not failed requests, so the model
-		// layer keeps its own report of those: inheriting the request's
-		// predicate would silence a failure nothing here retries.
-		retryReq.CallerRetriesError = nil
+		// This loop retries the invalid JSON it validates itself, not anything
+		// the request comes back with, so every error this call returns is the
+		// model layer's to report: inheriting the request's predicate would
+		// silence a failure nothing here retries.
+		retryReq.CallerRetriesError = retriesNothing
 		// Plain reviewProbe on purpose: this loop already owns the MaxOutputRetries
 		// budget for validation retries. Routing it through reviewProbeWithMode
 		// would nest two retry loops and multiply the request budget.
