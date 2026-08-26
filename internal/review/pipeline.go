@@ -747,6 +747,16 @@ func (st *PipelineState) setResultLocked(result *model.ReviewResult) {
 	st.verdictOverall = ""
 }
 
+// setFilteredResultLocked narrows the result in place of replacing it: the
+// findings are a subset of the ones already there and the overall fields are
+// untouched, so verdict provenance still describes the explanation and has to
+// survive. Use it only for filters over the current result — anything that
+// brings in prose from elsewhere belongs in setResultLocked. The caller must
+// hold st.mu.
+func (st *PipelineState) setFilteredResultLocked(result *model.ReviewResult) {
+	st.result = result
+}
+
 // setVerdictResultLocked records the verdict step's result together with its
 // run, keeping the overall explanation as verdict provenance when the agent
 // actually wrote it. The caller must hold st.mu.

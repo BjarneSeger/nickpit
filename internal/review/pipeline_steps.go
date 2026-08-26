@@ -1481,10 +1481,11 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 			sc.Engine.logf(ctx, "Summarize priority filter: dropped=%d kept=%d threshold=%s", dropped, len(filtered.Findings), priorityThresholdLabel(sc.Req.PriorityThreshold))
 			in = filtered
 			st.mu.Lock()
-			// Clearing provenance here can only cost a summary the verdict step
-			// already made redundant: verdict applies the same display-priority
-			// filter, so nothing it passed can be dropped again at this point.
-			st.setResultLocked(filtered)
+			// A stricter per-step priority_threshold than verdict's can empty the
+			// set here. That narrows the verdict's own result without touching its
+			// explanation, so provenance stays and the overall-only summarize below
+			// still recognizes the prose as the verdict agent's.
+			st.setFilteredResultLocked(filtered)
 			st.mu.Unlock()
 		}
 		if len(in.Findings) == 0 {

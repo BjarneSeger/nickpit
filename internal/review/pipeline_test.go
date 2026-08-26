@@ -2054,3 +2054,40 @@ func TestWorkflowFlatInjectedResultMatchingVerdictTextSkipsOverallSummarize(t *t
 		t.Fatalf("overall explanation = %q, want the imported text untouched", result.OverallExplanation)
 	}
 }
+
+// A summarize step may carry a stricter priority_threshold than verdict did.
+// The filter that then empties the finding set only narrows the verdict's own
+// result — its explanation, and so its provenance, must survive into the
+// overall-only summarize.
+func TestWorkflowFlatStricterSummarizePriorityKeepsVerdictProvenance(t *testing.T) {
+	client := &multiAgentLLM{}
+	engine := pipelineTestEngine(client)
+	p1 := "p1"
+	// P3 passes verdict at the run-level p3 default, then the summarize step's
+	// own p1 threshold drops it.
+	seed := writeFindingsFile(t, "seed.json", model.ReviewResult{
+		Findings:           []model.Finding{verifiedPipelineFinding("11111111-1111-4111-8111-111111111111", "Fix cleanup behavior alpha", "m.go", 1, 3)},
+		OverallCorrectness: "patch is incorrect",
+	})
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Type: workflow.StepVerdict, FindingsFrom: []string{seed}},
+		{Type: workflow.StepSummarize, Config: &workflow.StepOverride{PriorityThreshold: &p1}},
+	}}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{Mode: model.ModeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("findings = %d, want 0 after the stricter summarize threshold", len(result.Findings))
+	}
+	if len(client.summarizeRequests) != 1 {
+		t.Fatalf("summarize requests = %d, want the verdict prose summarized", len(client.summarizeRequests))
+	}
+	if !strings.Contains(result.OverallExplanation, "SUMMARY_MARKER VERDICT_MARKER findings=1") {
+		t.Fatalf("overall explanation = %q, want summarized verdict text", result.OverallExplanation)
+	}
+}
