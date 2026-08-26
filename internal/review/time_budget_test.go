@@ -404,7 +404,7 @@ func TestFailedLLMCallReportsErrorOnProgressButRecordsNoWarning(t *testing.T) {
 	if !strings.Contains(got, "error=reading stream: context deadline exceeded") {
 		t.Errorf("progress missing the call error:\n%s", got)
 	}
-	for _, line := range strings.Split(got, "\n") {
+	for line := range strings.SplitSeq(got, "\n") {
 		if strings.HasPrefix(line, "Response") && strings.Contains(line, " done") {
 			t.Errorf("failed call reported as done: %q", line)
 		}
