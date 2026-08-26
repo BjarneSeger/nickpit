@@ -1,0 +1,24 @@
+# Controls the notes GitHub generates for a release (see .goreleaser.yaml,
+# changelog.use: github-native). Pull requests are matched top to bottom, so
+# the catch-all category must stay last.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
+  categories:
+    - title: Features
+      labels:
+        - feature
+        - enhancement
+    - title: Bug Fixes
+      labels:
+        - bug
+        - fix
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Other Changes
+      labels:
+        - "*"

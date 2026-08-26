@@ -51,5 +51,7 @@ checksum:
   name_template: "checksums.txt"
 
 changelog:
-  use: git
-  sort: asc
+  # GitHub's own release-note generator: one line per merged pull request
+  # (title, author, link) instead of the raw commit list. Categories and
+  # exclusions come from .github/release.yml.
+  use: github-native
