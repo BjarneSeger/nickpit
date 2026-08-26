@@ -63,7 +63,7 @@ stage_row Agent      '1;38;2;88;156;252'  'azure blue'    'agent + workflow iden
 stage_row ModelCheck '1;38;2;20;252;144'  'spring green'  'reachability / capability probe of an endpoint'
 stage_row Review     '1;38;2;252;152;172' 'rose'          'review context: mode, profile, threshold, target'
 stage_row Chat       '1;38;2;172;140;236' 'lavender'      'chat mode turns'
-stage_row Request    '1;38;2;252;168;24'  'amber'         'request sent to the LLM (state=sent)'
+stage_row Request    '1;38;2;232;160;112' 'apricot'       'request sent to the LLM (state=sent)'
 stage_row Reasoning  '1;38;2;252;88;220'  'magenta'       'reasoning stream lifecycle'
 stage_row Response   '1;38;2;100;184;20'  'leaf green'    'response received (state=done)'
 stage_row Tool       '1;38;2;20;244;216'  'turquoise'     'tool call → result lines'
@@ -74,7 +74,7 @@ stage_row Verify     '1;38;2;0;172;176'   'deep teal'       'verification / refu
 stage_row Finalize   '1;38;2;100;172;108' 'sage green'    'dedupe, merge, filter'
 stage_row Verdict    '1;38;2;208;120;252' 'violet'        'overall correctness verdict'
 stage_row Summarize  '1;38;2;240;216;140' 'pale gold'     'summary generation'
-stage_row Warning    '1;38;2;232;160;112' 'apricot'       'soft failures: degraded lanes, exhausted time budgets'
+stage_row Warning    '1;38;2;252;168;24'  'amber'         'soft failures: degraded lanes, exhausted time budgets'
 printf '  %s\n' "$(grey 'unknown stage → 1;38;5;252 (bold light grey) fallback')"
 
 ################################################################################
@@ -161,7 +161,7 @@ printf '  %s %s %s %s\n' \
   "$(s '38;5;118' '7') $(light 'kept')$(grey ', ')$(s '38;5;118' '2') $(s '38;5;203' 'dropped')$(grey ', ')$(s '38;5;116' 'ratio')$(grey '=')$(s '38;5;118' '0.78')"
 
 printf '  %s %s %s\n' \
-  "$(s '1;38;2;252;168;24' "$(printf '%-10s' Request)")" \
+  "$(s '1;38;2;232;160;112' "$(printf '%-10s' Request)")" \
   "$(turn 4)" \
   "$(s '38;5;221' retry) $(light 'rate limited, backoff') $(s '38;5;118' '30')$(s '38;5;71' 's')"
 
@@ -176,7 +176,7 @@ printf '  %s %s %s\n' \
   "$(s '38;5;203' error) $(light 'context deadline exceeded after') $(s '38;5;118' '600')$(s '38;5;71' 's')$(grey ' · ')$(s '38;5;71' '∞')"
 
 printf '  %s %s %s\n' \
-  "$(s '1;38;2;232;160;112' "$(printf '%-10s' Warning)")" \
+  "$(s '1;38;2;252;168;24' "$(printf '%-10s' Warning)")" \
   "$(grey '[')$(s '38;5;37' 'Qwen3.6-480B')$(grey ':')$(s '38;5;218' 'high')$(grey ']')" \
   "$(s '38;5;221' warn) $(light 'Testing reviewer partial result')$(grey ': ')$(light nudge) $(s '38;5;118' '3')$(grey ': ')$(light 'context deadline exceeded')"
 printf '  %s\n' "$(grey 'warnings carry no agent identity — the bracket holds the run model alone')"
