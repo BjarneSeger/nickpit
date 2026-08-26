@@ -829,9 +829,11 @@ func (e *Engine) postMergeFusedStepFunc(fused postMergeFusedSpec) stepFunc {
 
 		var overallSummarizeRun *model.AgentRun
 		overallSummarizeWarnings := []string(nil)
-		// With no finalized findings the verdict's overall explanation is a short
-		// static message, so skip the overall-summary LLM call entirely.
-		if fused.hasSummarize && len(verdict.Findings) > 0 {
+		// With no finalized findings the overall explanation is the only prose the
+		// review ships, so it is still worth shortening — but only when the verdict
+		// agent wrote it. The deterministic verdict path emits a short static
+		// message instead, and that is not worth an LLM call.
+		if fused.hasSummarize && (len(verdict.Findings) > 0 || verdictAgentWroteOverall(verdictRun)) {
 			summarizeCtx, summarizeCancel := summarizeBudget.startOrCanceled()
 			overall, run, warnings := runOverallSummarize(summarizeCtx, summarizeSC, verdict.OverallExplanation)
 			summarizeCancel()
@@ -1123,6 +1125,15 @@ func runVerdictShard(ctx context.Context, sc *stepContext, st *PipelineState, in
 	verdict.Warnings = nil
 	sc.Engine.logWarnings(warnings)
 	return verdict, &run, warnings
+}
+
+// verdictAgentWroteOverall reports whether the overall explanation is real
+// verdict-agent prose rather than one of the static stubs the deterministic
+// verdict path (no findings plus --disable-patch-summary or a filter that
+// emptied the set) and the failure fallback emit. Only the former is worth an
+// LLM call to shorten.
+func verdictAgentWroteOverall(run *model.AgentRun) bool {
+	return run != nil && run.Status == model.AgentRunStatusOK
 }
 
 func runSummarizeShard(ctx context.Context, sc *stepContext, in *model.ReviewResult, shardLabel string) (*model.ReviewResult, *model.AgentRun, []string) {
@@ -1456,7 +1467,7 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 		st.mu.Unlock()
 
 		if in == nil || len(in.Findings) == 0 {
-			return nil
+			return summarizeOverallOnly(ctx, sc, st)
 		}
 		if filtered, dropped, err := filterResultByDisplayPriority(in, sc.Req.PriorityThreshold); err != nil {
 			return err
@@ -1468,7 +1479,7 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 			st.mu.Unlock()
 		}
 		if len(in.Findings) == 0 {
-			return nil
+			return summarizeOverallOnly(ctx, sc, st)
 		}
 		opts := summarizeOptionsFromStep(sc)
 		summarized, summarizeRun, err := sc.Engine.Summarize(ctx, in, opts)
@@ -1497,6 +1508,36 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 		st.summarizeUsage = addTokenUsage(st.summarizeUsage, summarizeRun.TokensUsed)
 		return nil
 	}
+}
+
+// summarizeOverallOnly handles the no-findings case: the verdict agent's patch
+// summary is then the only prose the review ships, so shorten it even though
+// there is no finding left to summarize. Static verdict stubs are left alone
+// (see verdictAgentWroteOverall).
+func summarizeOverallOnly(ctx context.Context, sc *stepContext, st *PipelineState) error {
+	st.mu.Lock()
+	in := st.result
+	verdictRun := st.verdictRun
+	st.mu.Unlock()
+	if in == nil || !verdictAgentWroteOverall(verdictRun) || strings.TrimSpace(in.OverallExplanation) == "" {
+		return nil
+	}
+	overall, run, warnings := runOverallSummarize(ctx, sc, in.OverallExplanation)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out, err := in.Clone()
+	if err != nil {
+		return fmt.Errorf("summarize: cloning review result: %w", err)
+	}
+	out.OverallExplanation = overall
+	st.result = out
+	if run != nil {
+		st.summarizeRuns = append(st.summarizeRuns, *run)
+		st.summarizeUsage = addTokenUsage(st.summarizeUsage, run.TokensUsed)
+	}
+	st.warnings.record(warnings...)
+	return nil
 }
 
 // injectGroups loads findings files (one group per file) and registers them as

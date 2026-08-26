@@ -1798,3 +1798,140 @@ func TestPipelineSurfacesWarningsWhenTheyHappen(t *testing.T) {
 		t.Errorf("assembly re-emitted warnings:\n%s", strings.TrimPrefix(progress.String(), beforeAssemble))
 	}
 }
+
+// With every reviewer empty the merge agent is skipped, but the verdict agent
+// still writes a real patch summary — the only prose the review ships. The
+// summarizer must shorten it even though there is no finding left to summarize.
+func TestWorkflowFusedNoFindingsStillSummarizesVerdictOverall(t *testing.T) {
+	client := &multiAgentLLM{}
+	engine := pipelineTestEngine(client)
+	empty := writeFindingsFile(t, "empty.json", model.ReviewResult{})
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Pipeline: []workflow.StepEntry{
+			{Type: workflow.StepMerge, FindingsFrom: []string{empty}},
+			{Type: workflow.StepFinalize},
+			{Type: workflow.StepVerdict},
+			{Type: workflow.StepSummarize},
+		}},
+	}}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{Mode: model.ModeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("findings = %d, want 0", len(result.Findings))
+	}
+	if len(client.verdictRequests) != 1 {
+		t.Fatalf("verdict requests = %d, want one", len(client.verdictRequests))
+	}
+	if len(client.summarizeRequests) != 1 {
+		t.Fatalf("summarize requests = %d, want one overall-only call", len(client.summarizeRequests))
+	}
+	if !strings.Contains(result.OverallExplanation, "SUMMARY_MARKER VERDICT_MARKER findings=0") {
+		t.Fatalf("overall explanation = %q, want summarized verdict text", result.OverallExplanation)
+	}
+	if countAgentRuns(result.AgentRuns, "summarize") != 1 {
+		t.Fatalf("summarize runs = %d, want one recorded run", countAgentRuns(result.AgentRuns, "summarize"))
+	}
+	if result.SummarizeTokensUsed.TotalTokens != 5 {
+		t.Fatalf("summarize tokens = %+v, want the overall run's tokens", result.SummarizeTokensUsed)
+	}
+}
+
+// The deterministic verdict path emits a static one-liner instead of agent
+// prose; shortening that is pointless, so summarize must stay off.
+func TestWorkflowFusedNoFindingsSkipsSummarizeForStaticVerdictText(t *testing.T) {
+	client := &multiAgentLLM{}
+	engine := pipelineTestEngine(client)
+	empty := writeFindingsFile(t, "empty.json", model.ReviewResult{})
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Pipeline: []workflow.StepEntry{
+			{Type: workflow.StepMerge, FindingsFrom: []string{empty}},
+			{Type: workflow.StepFinalize},
+			{Type: workflow.StepVerdict},
+			{Type: workflow.StepSummarize},
+		}},
+	}}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{Mode: model.ModeLocal, DisablePatchSummary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.verdictRequests) != 0 {
+		t.Fatalf("verdict requests = %d, want the deterministic path", len(client.verdictRequests))
+	}
+	if len(client.summarizeRequests) != 0 {
+		t.Fatalf("summarize requests = %d, want none for static verdict text", len(client.summarizeRequests))
+	}
+	if result.OverallExplanation != "No finalized findings remained." {
+		t.Fatalf("overall explanation = %q, want the untouched static message", result.OverallExplanation)
+	}
+}
+
+// A failed verdict leaves the merged fallback text behind, not agent prose, so
+// the overall-only summarize must not fire on it either.
+func TestWorkflowFusedNoFindingsSkipsSummarizeWhenVerdictFails(t *testing.T) {
+	client := &multiAgentLLM{verdictFailErr: errors.New("verdict boom")}
+	engine := pipelineTestEngine(client)
+	empty := writeFindingsFile(t, "empty.json", model.ReviewResult{})
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Pipeline: []workflow.StepEntry{
+			{Type: workflow.StepMerge, FindingsFrom: []string{empty}},
+			{Type: workflow.StepFinalize},
+			{Type: workflow.StepVerdict},
+			{Type: workflow.StepSummarize},
+		}},
+	}}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{Mode: model.ModeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.summarizeRequests) != 0 {
+		t.Fatalf("summarize requests = %d, want none after a verdict failure", len(client.summarizeRequests))
+	}
+	if strings.Contains(result.OverallExplanation, "SUMMARY_MARKER") {
+		t.Fatalf("overall explanation = %q, want the unsummarized fallback", result.OverallExplanation)
+	}
+}
+
+// Same rule on the unfused pipeline, where verdict and summarize are separate
+// top-level steps and summarize reads the verdict's result off the state.
+func TestWorkflowFlatNoFindingsStillSummarizesVerdictOverall(t *testing.T) {
+	client := &multiAgentLLM{}
+	engine := pipelineTestEngine(client)
+	empty := writeFindingsFile(t, "empty.json", model.ReviewResult{})
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Type: workflow.StepMerge, FindingsFrom: []string{empty}},
+		{Type: workflow.StepFinalize},
+		{Type: workflow.StepVerdict},
+		{Type: workflow.StepSummarize},
+	}}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{Mode: model.ModeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.summarizeRequests) != 1 {
+		t.Fatalf("summarize requests = %d, want one overall-only call", len(client.summarizeRequests))
+	}
+	if !strings.Contains(result.OverallExplanation, "SUMMARY_MARKER VERDICT_MARKER findings=0") {
+		t.Fatalf("overall explanation = %q, want summarized verdict text", result.OverallExplanation)
+	}
+	if countAgentRuns(result.AgentRuns, "summarize") != 1 {
+		t.Fatalf("summarize runs = %d, want one recorded run", countAgentRuns(result.AgentRuns, "summarize"))
+	}
+}
