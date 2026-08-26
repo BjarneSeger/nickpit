@@ -1429,6 +1429,9 @@ func (e *Engine) verdictStepFunc(findingsFrom []string) stepFunc {
 		}
 		st.result = verdict
 		st.verdictRun = &verdictRun
+		if verdictAgentWroteOverall(&verdictRun) {
+			st.verdictOverall = verdict.OverallExplanation
+		}
 		st.verdictUsage = addTokenUsage(st.verdictUsage, verdictRun.TokensUsed)
 		return nil
 	}
@@ -1513,13 +1516,19 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 // summarizeOverallOnly handles the no-findings case: the verdict agent's patch
 // summary is then the only prose the review ships, so shorten it even though
 // there is no finding left to summarize. Static verdict stubs are left alone
-// (see verdictAgentWroteOverall).
+// (see verdictAgentWroteOverall), and so is text the current result did not get
+// from the verdict agent — matching st.verdictOverall ties the decision to the
+// result in hand rather than to a verdict run a later `findings_from:` step may
+// have since replaced.
 func summarizeOverallOnly(ctx context.Context, sc *stepContext, st *PipelineState) error {
 	st.mu.Lock()
 	in := st.result
-	verdictRun := st.verdictRun
+	verdictOverall := st.verdictOverall
 	st.mu.Unlock()
-	if in == nil || !verdictAgentWroteOverall(verdictRun) || strings.TrimSpace(in.OverallExplanation) == "" {
+	if in == nil || verdictOverall == "" || in.OverallExplanation != verdictOverall {
+		return nil
+	}
+	if strings.TrimSpace(in.OverallExplanation) == "" {
 		return nil
 	}
 	overall, run, warnings := runOverallSummarize(ctx, sc, in.OverallExplanation)

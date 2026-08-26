@@ -1935,3 +1935,41 @@ func TestWorkflowFlatNoFindingsStillSummarizesVerdictOverall(t *testing.T) {
 		t.Fatalf("summarize runs = %d, want one recorded run", countAgentRuns(result.AgentRuns, "summarize"))
 	}
 }
+
+// A flat workflow may replace the result after a successful verdict by
+// injecting findings into a later step. The imported overall explanation is
+// then not verdict-agent prose, so the overall-only summarize must not fire on
+// it even though the earlier verdict run succeeded.
+func TestWorkflowFlatInjectedResultAfterVerdictSkipsOverallSummarize(t *testing.T) {
+	client := &multiAgentLLM{}
+	engine := pipelineTestEngine(client)
+	withFindings := writeFindingsFile(t, "verdict-in.json", model.ReviewResult{
+		Findings:           []model.Finding{verifiedPipelineFinding("11111111-1111-4111-8111-111111111111", "Fix cleanup behavior alpha", "m.go", 1, 1)},
+		OverallCorrectness: "patch is incorrect",
+	})
+	imported := writeFindingsFile(t, "summarize-in.json", model.ReviewResult{
+		OverallCorrectness: "patch is correct",
+		OverallExplanation: "IMPORTED_PROSE from an unrelated run",
+	})
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Type: workflow.StepVerdict, FindingsFrom: []string{withFindings}},
+		{Type: workflow.StepSummarize, FindingsFrom: []string{imported}},
+	}}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{Mode: model.ModeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.verdictRequests) != 1 {
+		t.Fatalf("verdict requests = %d, want one", len(client.verdictRequests))
+	}
+	if len(client.summarizeRequests) != 0 {
+		t.Fatalf("summarize requests = %d, want none for imported prose", len(client.summarizeRequests))
+	}
+	if result.OverallExplanation != "IMPORTED_PROSE from an unrelated run" {
+		t.Fatalf("overall explanation = %q, want the imported text untouched", result.OverallExplanation)
+	}
+}

@@ -60,11 +60,17 @@ type PipelineState struct {
 	dedupeRuns       []model.AgentRun
 	// Per-vector dedupe runs, keyed so telemetry orders them by groupOrder
 	// instead of the nondeterministic lane-completion order.
-	dedupeVectorRuns      map[string][]model.AgentRun
-	mergeRuns             []model.AgentRun
-	mergeReasoning        string
-	finalizeRuns          []model.AgentRun
-	verdictRun            *model.AgentRun
+	dedupeVectorRuns map[string][]model.AgentRun
+	mergeRuns        []model.AgentRun
+	mergeReasoning   string
+	finalizeRuns     []model.AgentRun
+	verdictRun       *model.AgentRun
+	// verdictOverall is the overall explanation the verdict agent wrote, kept
+	// so a later step can tell verdict prose from text that merely happens to
+	// sit in st.result — a `findings_from:` injection replaces the whole result
+	// while verdictRun still points at the earlier success. Empty unless the
+	// agent actually ran (the deterministic and failure paths emit static text).
+	verdictOverall        string
 	summarizeRuns         []model.AgentRun
 	categorizeUsage       model.TokenUsage
 	verificationToolCalls int
