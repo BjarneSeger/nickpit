@@ -114,7 +114,7 @@ swatch '38;5;177' 'progressColorSkipPurple'        'skip state'
 swatch '38;5;179' 'dupGold (live.go, local)'       '"duplicate" label in the live footer'
 swatch '3;90'     'reasoning_renderer.go'          'italic dim grey — the streamed reasoning block'
 swatch '2'        'output/terminal.go Dim'         'dim review-output chrome + the closing rule'
-swatch '33'       'output/terminal.go Warn'        'legacy yellow warnings in review output'
+swatch '33'       'output/terminal.go Warn'        'warning summary and per-warning type tags in review output'
 
 ################################################################################
 heading 'Example --show-progress lines'
@@ -458,6 +458,16 @@ heading 'Reasoning stream — reasoning_renderer.go'
 printf '  %s\n' "$(s '3;90' 'Reasoning for review: security...')"
 printf '  %s\n' "$(s '3;90' 'Checking whether the token expiry comparison is inclusive…')"
 printf '  %s\n' "$(grey 'italic dim grey (3;90) for the whole streamed block, so reasoning never competes with progress lines')"
+
+################################################################################
+heading 'Warning-only review output — output/terminal.go FormatWarnings()'
+################################################################################
+
+printf '  %s\n\n' "$(s '33' '! Warnings: 3 (Budget: 1, Publish: 1, Verify: 1)')"
+printf '  %s %s\n' "$(s '33' '[Publish]')" 'Publish failed: upstream 503'
+printf '  %s %s\n' "$(s '33' '[Budget]')" 'Time budget exhausted before finalization'
+printf '  %s %s\n' "$(s '33' '[Verify]')" 'Verify failed for finding #1: context deadline exceeded'
+printf '  %s\n' "$(grey 'summary and [Type] tags use SGR 33 yellow; warning bodies remain unstyled and preserve run order')"
 
 ################################################################################
 heading 'Review output badges — output/badge.go (truecolor background, black text)'

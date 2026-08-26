@@ -663,3 +663,75 @@ func TestJSONFormatterOmitsVerificationWhenNil(t *testing.T) {
 		t.Fatalf("verification should be omitted: %#v", first)
 	}
 }
+
+func TestTerminalFormatterFormatWarnings(t *testing.T) {
+	withoutNoColor(t)
+	result := &model.ReviewResult{
+		Findings: []model.Finding{{
+			Title: "Race in stream retry", Priority: intPtr(2),
+			CodeLocation: model.CodeLocation{FilePath: "internal/llm/client.go", LineRange: model.LineRange{Start: 1, End: 1}},
+		}},
+		Warnings: []string{
+			"Publish failed: upstream 503",
+			"Verify cancelled at finding #2: context canceled",
+			"Time budget for step review exhausted\x07",
+		},
+	}
+
+	var plain bytes.Buffer
+	if err := NewMarkdownFormatter(&plain).FormatWarnings(result); err != nil {
+		t.Fatal(err)
+	}
+	want := "! Warnings: 3 (Budget: 1, Publish: 1, Verify: 1)\n\n" +
+		"[Publish] Publish failed: upstream 503\n" +
+		"[Verify] Verify cancelled at finding #2: context canceled\n" +
+		"[Budget] Time budget for step review exhausted\n"
+	if plain.String() != want {
+		t.Fatalf("plain warnings = %q, want %q", plain.String(), want)
+	}
+	// The warnings replace the review, so no finding may appear alongside them.
+	if strings.Contains(plain.String(), "Race in stream retry") {
+		t.Fatalf("findings leaked into the warnings output:\n%s", plain.String())
+	}
+
+	var ansi bytes.Buffer
+	formatter := NewTerminalFormatter(&ansi, true)
+	if err := formatter.FormatWarnings(result); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"\x1b[33m! Warnings: 3", "\x1b[33m[Publish]\x1b[0m Publish failed: upstream 503"} {
+		if !strings.Contains(ansi.String(), want) {
+			t.Fatalf("ANSI warnings %q missing %q", ansi.String(), want)
+		}
+	}
+}
+
+func TestFormatWarningsWithoutWarnings(t *testing.T) {
+	result := &model.ReviewResult{OverallCorrectness: "patch is correct"}
+
+	var text bytes.Buffer
+	if err := NewMarkdownFormatter(&text).FormatWarnings(result); err != nil {
+		t.Fatal(err)
+	}
+	if text.String() != "No warnings.\n" {
+		t.Fatalf("text output = %q", text.String())
+	}
+
+	// JSON stays machine-readable: the key is present with an empty list, never
+	// null and never absent.
+	var jsonBuf bytes.Buffer
+	if err := NewJSONFormatter(&jsonBuf).FormatWarnings(result); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(jsonBuf.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, jsonBuf.String())
+	}
+	warnings, ok := payload["warnings"].([]any)
+	if !ok || len(warnings) != 0 {
+		t.Fatalf("warnings key = %#v, want an empty list", payload["warnings"])
+	}
+	if len(payload) != 1 {
+		t.Fatalf("JSON warnings output carries extra keys: %#v", payload)
+	}
+}

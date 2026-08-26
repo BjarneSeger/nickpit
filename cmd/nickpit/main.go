@@ -1932,20 +1932,28 @@ func (a *app) emitResult(ctx context.Context, source model.ReviewSource, profile
 // and `nickpit session`. Markdown renders when stdout is a terminal and stays
 // unrendered for pipes; raw forces unrendered Markdown even on a terminal.
 func (a *app) formatReview(w io.Writer, result *model.ReviewResult) error {
-	var formatter output.Formatter
+	return a.reviewFormatter(w).FormatFindings(result)
+}
+
+// formatWarnings prints only the run's warnings, in the same format selection
+// as formatReview.
+func (a *app) formatWarnings(w io.Writer, result *model.ReviewResult) error {
+	return a.reviewFormatter(w).FormatWarnings(result)
+}
+
+func (a *app) reviewFormatter(w io.Writer) output.Formatter {
 	switch {
 	case a.jsonOutput || a.outputFormat == "json":
-		formatter = output.NewJSONFormatter(w)
+		return output.NewJSONFormatter(w)
 	case a.outputFormat == "raw":
-		formatter = output.NewMarkdownFormatter(w)
+		return output.NewMarkdownFormatter(w)
 	default:
 		useANSI := false
 		if f, ok := w.(*os.File); ok {
 			useANSI = isTerminal(f)
 		}
-		formatter = output.NewTerminalFormatter(w, useANSI)
+		return output.NewTerminalFormatter(w, useANSI)
 	}
-	return formatter.FormatFindings(result)
 }
 
 func liveProgressEnabled(stderrTTY bool, termName string, verbose, showProgress, showReasoning, disableLiveProgress bool) bool {

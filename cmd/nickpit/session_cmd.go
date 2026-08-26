@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dgrieser/nickpit/internal/clipboard"
+	"github.com/dgrieser/nickpit/internal/model"
 	"github.com/dgrieser/nickpit/internal/session"
 	"github.com/dgrieser/nickpit/internal/textsan"
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ import (
 type sessionOptions struct {
 	sessionID string
 	clipboard bool
+	warnings  bool
 }
 
 func (a *app) newSessionCmd() *cobra.Command {
@@ -25,8 +27,9 @@ func (a *app) newSessionCmd() *cobra.Command {
 		Use:   "session [session-id]",
 		Short: "Print a saved review",
 		Long: "Print a review from a saved chat session. Omit the session id to " +
-			"print the most recently updated session. With --clipboard the review " +
-			"is copied to the system clipboard instead of printed.",
+			"print the most recently updated session. With --warnings only the " +
+			"run's warnings are printed instead of the review. With --clipboard the " +
+			"output is copied to the system clipboard instead of printed.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.runSession(cmd.Context(), opts, args)
@@ -39,7 +42,8 @@ func (a *app) newSessionCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.sessionID, "session", "", "Print an existing session by id")
-	cmd.Flags().BoolVar(&opts.clipboard, "clipboard", false, "Copy the review to the system clipboard instead of printing it (uses the platform clipboard helper: pbcopy, clip.exe, wl-copy, xclip, xsel, or termux-clipboard-set)")
+	cmd.Flags().BoolVar(&opts.warnings, "warnings", false, "Print only the warnings the run recorded, not the review")
+	cmd.Flags().BoolVar(&opts.clipboard, "clipboard", false, "Copy the output to the system clipboard instead of printing it (uses the platform clipboard helper: pbcopy, clip.exe, wl-copy, xclip, xsel, or termux-clipboard-set)")
 	_ = cmd.RegisterFlagCompletionFunc("session", func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return a.completeSessionIDs(toComplete)
 	})
@@ -96,20 +100,26 @@ func (a *app) runSessionTo(ctx context.Context, opts sessionOptions, args []stri
 	if sess.Result == nil {
 		return fmt.Errorf("session: %s has no saved review", sess.ID)
 	}
-	if opts.clipboard {
-		return a.copyReviewToClipboard(ctx, sess, w)
+	render, subject := a.formatReview, "review"
+	if opts.warnings {
+		render, subject = a.formatWarnings, "warnings"
 	}
-	return a.formatReview(w, sess.Result)
+	if opts.clipboard {
+		return a.copySessionToClipboard(ctx, sess, w, render, subject)
+	}
+	return render(w, sess.Result)
 }
 
-// copyReviewToClipboard renders the review in the selected --output format and
-// hands it to the platform clipboard helper, printing a one-line confirmation
-// instead of the review itself. Rendering into a buffer (not a *os.File) makes
-// formatReview pick the unstyled form, so the clipboard carries Markdown or
-// JSON source rather than terminal escapes.
-func (a *app) copyReviewToClipboard(ctx context.Context, sess *session.Session, w io.Writer) error {
+// copySessionToClipboard renders the session in the selected --output format
+// and hands it to the platform clipboard helper, printing a one-line
+// confirmation instead of the content itself. Rendering into a buffer (not a
+// *os.File) makes the formatter pick the unstyled form, so the clipboard
+// carries Markdown or JSON source rather than terminal escapes. subject names
+// what was copied (review or warnings) in that confirmation.
+func (a *app) copySessionToClipboard(ctx context.Context, sess *session.Session, w io.Writer,
+	render func(io.Writer, *model.ReviewResult) error, subject string) error {
 	var buf bytes.Buffer
-	if err := a.formatReview(&buf, sess.Result); err != nil {
+	if err := render(&buf, sess.Result); err != nil {
 		return err
 	}
 	copyFn := a.clipboardCopy
@@ -120,9 +130,9 @@ func (a *app) copyReviewToClipboard(ctx context.Context, sess *session.Session, 
 	if err != nil {
 		return fmt.Errorf("session: %w", err)
 	}
-	if _, err := fmt.Fprintf(w, "Copied review of session %s to the clipboard (%d bytes) via %s.\n",
-		textsan.StripControl(sess.ID), buf.Len(), helper); err != nil {
-		// The clipboard already holds the review; a confirmation that could not be
+	if _, err := fmt.Fprintf(w, "Copied %s of session %s to the clipboard (%d bytes) via %s.\n",
+		subject, textsan.StripControl(sess.ID), buf.Len(), helper); err != nil {
+		// The clipboard already holds the content; a confirmation that could not be
 		// written (closed pipe, full disk) is not a failed copy, so warn instead of
 		// reporting the command as failed.
 		a.warnf("session: could not print the clipboard confirmation: %v", err)
