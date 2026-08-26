@@ -563,12 +563,12 @@ func (e *Engine) mergeStepFunc(findingsFrom []string) stepFunc {
 		st.mergeRuns = append(st.mergeRuns, mergeRuns...)
 		st.mergeReasoning = mergeResult.reasoningEffort
 		st.warnings.add(warnings...)
-		st.result = &model.ReviewResult{
+		st.setResultLocked(&model.ReviewResult{
 			Findings:               filtered,
 			OverallCorrectness:     mergeResult.resp.OverallCorrectness,
 			OverallExplanation:     mergeResult.resp.OverallExplanation,
 			OverallConfidenceScore: mergeResult.resp.OverallConfidenceScore,
-		}
+		})
 		st.mu.Unlock()
 		return nil
 	}
@@ -649,12 +649,12 @@ func (e *Engine) postMergeFusedStepFunc(fused postMergeFusedSpec) stepFunc {
 			st.mu.Lock()
 			st.mergeRuns = append(st.mergeRuns, mergeResult.run)
 			st.warnings.add(warning)
-			st.result = &model.ReviewResult{
+			st.setResultLocked(&model.ReviewResult{
 				Findings:               nil,
 				OverallCorrectness:     mergeResult.resp.OverallCorrectness,
 				OverallExplanation:     mergeResult.resp.OverallExplanation,
 				OverallConfidenceScore: mergeResult.resp.OverallConfidenceScore,
-			}
+			})
 			st.mu.Unlock()
 			verdictCtx, verdictCancel := verdictBudget.startOrCanceled()
 			defer verdictCancel()
@@ -829,9 +829,11 @@ func (e *Engine) postMergeFusedStepFunc(fused postMergeFusedSpec) stepFunc {
 
 		var overallSummarizeRun *model.AgentRun
 		overallSummarizeWarnings := []string(nil)
-		// With no finalized findings the verdict's overall explanation is a short
-		// static message, so skip the overall-summary LLM call entirely.
-		if fused.hasSummarize && len(verdict.Findings) > 0 {
+		// With no finalized findings the overall explanation is the only prose the
+		// review ships, so it is still worth shortening — but only when the verdict
+		// agent wrote it. The deterministic verdict path emits a short static
+		// message instead, and that is not worth an LLM call.
+		if fused.hasSummarize && (len(verdict.Findings) > 0 || verdictAgentWroteOverall(verdictRun)) {
 			summarizeCtx, summarizeCancel := summarizeBudget.startOrCanceled()
 			overall, run, warnings := runOverallSummarize(summarizeCtx, summarizeSC, verdict.OverallExplanation)
 			summarizeCancel()
@@ -896,7 +898,14 @@ func (e *Engine) postMergeFusedStepFunc(fused postMergeFusedSpec) stepFunc {
 		st.warnings.record(summarizeWarnings...)
 		st.warnings.record(verdictWarnings...)
 		st.warnings.record(overallSummarizeWarnings...)
-		st.result = verdict
+		st.setResultLocked(verdict)
+		// A fused group without its own summarize step hands the verdict prose to
+		// a later flat summarize; record it there so that step can tell it apart
+		// from text an injection put in the result. When the group did summarize,
+		// the prose is already shortened and must not go round again.
+		if !fused.hasSummarize && verdictAgentWroteOverall(verdictRun) {
+			st.verdictOverall = verdict.OverallExplanation
+		}
 		st.mu.Unlock()
 		return nil
 	}
@@ -1125,6 +1134,15 @@ func runVerdictShard(ctx context.Context, sc *stepContext, st *PipelineState, in
 	return verdict, &run, warnings
 }
 
+// verdictAgentWroteOverall reports whether the overall explanation is real
+// verdict-agent prose rather than one of the static stubs the deterministic
+// verdict path (no findings plus --disable-patch-summary or a filter that
+// emptied the set) and the failure fallback emit. Only the former is worth an
+// LLM call to shorten.
+func verdictAgentWroteOverall(run *model.AgentRun) bool {
+	return run != nil && run.Status == model.AgentRunStatusOK
+}
+
 func runSummarizeShard(ctx context.Context, sc *stepContext, in *model.ReviewResult, shardLabel string) (*model.ReviewResult, *model.AgentRun, []string) {
 	opts := summarizeOptionsFromStep(sc)
 	opts.ShardLabel = shardLabel
@@ -1298,17 +1316,17 @@ func (e *Engine) finalizeStepFunc(findingsFrom []string) stepFunc {
 				model.StripSuggestions(findings)
 			}
 			st.mu.Lock()
-			st.result = &model.ReviewResult{
+			st.setResultLocked(&model.ReviewResult{
 				Findings:               findings,
 				OverallCorrectness:     flat.overallCorrectness,
 				OverallExplanation:     flat.overallExplanation,
 				OverallConfidenceScore: flat.overallConfidence,
-			}
+			})
 			st.mu.Unlock()
 		}
 		st.mu.Lock()
 		if st.result == nil {
-			st.result = st.materializeFromGroupsLocked(sc.Req)
+			st.setResultLocked(st.materializeFromGroupsLocked(sc.Req))
 		}
 		in := st.result
 		contextNotes := st.contextNotes
@@ -1323,7 +1341,7 @@ func (e *Engine) finalizeStepFunc(findingsFrom []string) stepFunc {
 		defer st.mu.Unlock()
 		if err != nil {
 			if finalized != nil {
-				st.result = finalized
+				st.setResultLocked(finalized)
 			}
 			sc.Engine.logf(ctx, "Finalize failed, using verified result: error=%v", err)
 			st.warnings.addf("Finalize failed: %v; using verified result", err)
@@ -1348,7 +1366,7 @@ func (e *Engine) finalizeStepFunc(findingsFrom []string) stepFunc {
 			sc.Engine.logf(ctx, "Finalize priority filter: dropped=%d kept=%d threshold=%s", dropped, len(filtered.Findings), priorityThresholdLabel(sc.Req.PriorityThreshold))
 			finalized = filtered
 		}
-		st.result = finalized
+		st.setResultLocked(finalized)
 		st.finalizeRuns = append(st.finalizeRuns, finalizeRun)
 		st.finalizeUsage = addTokenUsage(st.finalizeUsage, finalizeRun.TokensUsed)
 		return nil
@@ -1372,17 +1390,17 @@ func (e *Engine) verdictStepFunc(findingsFrom []string) stepFunc {
 				model.StripSuggestions(findings)
 			}
 			st.mu.Lock()
-			st.result = &model.ReviewResult{
+			st.setResultLocked(&model.ReviewResult{
 				Findings:               findings,
 				OverallCorrectness:     flat.overallCorrectness,
 				OverallExplanation:     flat.overallExplanation,
 				OverallConfidenceScore: flat.overallConfidence,
-			}
+			})
 			st.mu.Unlock()
 		}
 		st.mu.Lock()
 		if st.result == nil {
-			st.result = st.materializeFromGroupsLocked(sc.Req)
+			st.setResultLocked(st.materializeFromGroupsLocked(sc.Req))
 		}
 		in := st.result
 		contextNotes := st.contextNotes
@@ -1409,15 +1427,14 @@ func (e *Engine) verdictStepFunc(findingsFrom []string) stepFunc {
 			sc.Engine.logRunWarning(verdictRun)
 			st.verdictRun = &verdictRun
 			st.verdictUsage = addTokenUsage(st.verdictUsage, verdictRun.TokensUsed)
-			st.result = in
+			st.setResultLocked(in)
 			return nil
 		}
 		if len(verdict.Warnings) > 0 {
 			st.warnings.add(verdict.Warnings...)
 			verdict.Warnings = nil
 		}
-		st.result = verdict
-		st.verdictRun = &verdictRun
+		st.setVerdictResultLocked(verdict, &verdictRun)
 		st.verdictUsage = addTokenUsage(st.verdictUsage, verdictRun.TokensUsed)
 		return nil
 	}
@@ -1440,23 +1457,23 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 				model.StripSuggestions(findings)
 			}
 			st.mu.Lock()
-			st.result = &model.ReviewResult{
+			st.setResultLocked(&model.ReviewResult{
 				Findings:               findings,
 				OverallCorrectness:     flat.overallCorrectness,
 				OverallExplanation:     flat.overallExplanation,
 				OverallConfidenceScore: flat.overallConfidence,
-			}
+			})
 			st.mu.Unlock()
 		}
 		st.mu.Lock()
 		if st.result == nil {
-			st.result = st.materializeFromGroupsLocked(sc.Req)
+			st.setResultLocked(st.materializeFromGroupsLocked(sc.Req))
 		}
 		in := st.result
 		st.mu.Unlock()
 
 		if in == nil || len(in.Findings) == 0 {
-			return nil
+			return summarizeOverallOnly(ctx, sc, st)
 		}
 		if filtered, dropped, err := filterResultByDisplayPriority(in, sc.Req.PriorityThreshold); err != nil {
 			return err
@@ -1464,11 +1481,15 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 			sc.Engine.logf(ctx, "Summarize priority filter: dropped=%d kept=%d threshold=%s", dropped, len(filtered.Findings), priorityThresholdLabel(sc.Req.PriorityThreshold))
 			in = filtered
 			st.mu.Lock()
-			st.result = filtered
+			// A stricter per-step priority_threshold than verdict's can empty the
+			// set here. That narrows the verdict's own result without touching its
+			// explanation, so provenance stays and the overall-only summarize below
+			// still recognizes the prose as the verdict agent's.
+			st.setFilteredResultLocked(filtered)
 			st.mu.Unlock()
 		}
 		if len(in.Findings) == 0 {
-			return nil
+			return summarizeOverallOnly(ctx, sc, st)
 		}
 		opts := summarizeOptionsFromStep(sc)
 		summarized, summarizeRun, err := sc.Engine.Summarize(ctx, in, opts)
@@ -1492,11 +1513,44 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 			st.warnings.add(summarized.Warnings...)
 			summarized.Warnings = nil
 		}
-		st.result = summarized
+		st.setResultLocked(summarized)
 		st.summarizeRuns = append(st.summarizeRuns, summarizeRun)
 		st.summarizeUsage = addTokenUsage(st.summarizeUsage, summarizeRun.TokensUsed)
 		return nil
 	}
+}
+
+// summarizeOverallOnly handles the no-findings case: the verdict agent's patch
+// summary is then the only prose the review ships, so shorten it even though
+// there is no finding left to summarize. Static verdict stubs are left alone
+// (see verdictAgentWroteOverall), and so is any result an injection or a later
+// stage put in place of the verdict's — st.verdictOverall is cleared by every
+// write that is not the verdict's own, so it names the prose of the result in
+// hand rather than of a verdict run that has since been replaced.
+func summarizeOverallOnly(ctx context.Context, sc *stepContext, st *PipelineState) error {
+	st.mu.Lock()
+	in := st.result
+	verdictOverall := st.verdictOverall
+	st.mu.Unlock()
+	if in == nil || strings.TrimSpace(verdictOverall) == "" {
+		return nil
+	}
+	overall, run, warnings := runOverallSummarize(ctx, sc, in.OverallExplanation)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out, err := in.Clone()
+	if err != nil {
+		return fmt.Errorf("summarize: cloning review result: %w", err)
+	}
+	out.OverallExplanation = overall
+	st.setResultLocked(out)
+	if run != nil {
+		st.summarizeRuns = append(st.summarizeRuns, *run)
+		st.summarizeUsage = addTokenUsage(st.summarizeUsage, run.TokensUsed)
+	}
+	st.warnings.record(warnings...)
+	return nil
 }
 
 // injectGroups loads findings files (one group per file) and registers them as

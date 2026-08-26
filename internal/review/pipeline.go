@@ -60,11 +60,19 @@ type PipelineState struct {
 	dedupeRuns       []model.AgentRun
 	// Per-vector dedupe runs, keyed so telemetry orders them by groupOrder
 	// instead of the nondeterministic lane-completion order.
-	dedupeVectorRuns      map[string][]model.AgentRun
-	mergeRuns             []model.AgentRun
-	mergeReasoning        string
-	finalizeRuns          []model.AgentRun
-	verdictRun            *model.AgentRun
+	dedupeVectorRuns map[string][]model.AgentRun
+	mergeRuns        []model.AgentRun
+	mergeReasoning   string
+	finalizeRuns     []model.AgentRun
+	verdictRun       *model.AgentRun
+	// verdictOverall is the overall explanation the verdict agent wrote, kept so
+	// a later step can tell verdict prose from text that merely happens to sit in
+	// st.result — a `findings_from:` injection replaces the whole result while
+	// verdictRun still points at the earlier success. Every write that is not the
+	// verdict's own clears it (see setResultLocked), so it never outlives the
+	// result it describes. Empty unless the agent actually ran: the deterministic
+	// and failure paths emit static text not worth an LLM call.
+	verdictOverall        string
 	summarizeRuns         []model.AgentRun
 	categorizeUsage       model.TokenUsage
 	verificationToolCalls int
@@ -727,6 +735,37 @@ func (st *PipelineState) aggregateTelemetry() ([]model.AgentRun, model.TokenUsag
 		toolCalls += run.ToolCalls
 	}
 	return runs, usage, toolCalls, reasoning
+}
+
+// setResultLocked replaces the flat result and drops verdict provenance with
+// it. Every write to st.result goes through this or setVerdictResultLocked, so
+// verdictOverall can never outlive the result it describes — an injected
+// `findings_from:` result, a materialization, or a summarized one all clear it,
+// and only the verdict's own write puts it back. The caller must hold st.mu.
+func (st *PipelineState) setResultLocked(result *model.ReviewResult) {
+	st.result = result
+	st.verdictOverall = ""
+}
+
+// setFilteredResultLocked narrows the result in place of replacing it: the
+// findings are a subset of the ones already there and the overall fields are
+// untouched, so verdict provenance still describes the explanation and has to
+// survive. Use it only for filters over the current result — anything that
+// brings in prose from elsewhere belongs in setResultLocked. The caller must
+// hold st.mu.
+func (st *PipelineState) setFilteredResultLocked(result *model.ReviewResult) {
+	st.result = result
+}
+
+// setVerdictResultLocked records the verdict step's result together with its
+// run, keeping the overall explanation as verdict provenance when the agent
+// actually wrote it. The caller must hold st.mu.
+func (st *PipelineState) setVerdictResultLocked(result *model.ReviewResult, run *model.AgentRun) {
+	st.setResultLocked(result)
+	st.verdictRun = run
+	if result != nil && verdictAgentWroteOverall(run) {
+		st.verdictOverall = result.OverallExplanation
+	}
 }
 
 // materializeFromGroups flattens the current groups into a flat result. Used by
