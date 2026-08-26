@@ -129,6 +129,7 @@ type LiveRenderer struct {
 	agents    map[string]*liveAgent
 	steps     map[string]WorkflowScope
 	findings  liveFindingStats
+	warnings  int
 	lastRows  int
 	final     []string
 	closed    bool
@@ -317,6 +318,16 @@ func (r *LiveRenderer) AgentDone(info ProgressInfo) {
 }
 
 func (r *LiveRenderer) Progress(info ProgressInfo, scope WorkflowScope, stage Stage, state State, _ string, deadline time.Time) {
+	// Warnings carry no agent identity: they are run-level soft failures. The
+	// dashboard shows only their count, and only once there is one — the
+	// result footer carries the texts.
+	if stage == StageWarning && state == StateWarn {
+		r.mu.Lock()
+		r.warnings++
+		r.mu.Unlock()
+		r.signal()
+		return
+	}
 	if info.AgentRole == "" {
 		return
 	}
@@ -1080,8 +1091,12 @@ func rgbSGR(prefix string, c [3]int) string {
 func (r *LiveRenderer) findingLineLocked() string {
 	f, kept := r.findings, r.keptLocked()
 	if !r.useANSI {
-		return fmt.Sprintf("  Findings %d · refuted %d · duplicate %d · filtered %d · final %d",
+		line := fmt.Sprintf("  Findings %d · refuted %d · duplicate %d · filtered %d · final %d",
 			f.Found, f.Refuted, f.Duplicate, f.Filtered, kept)
+		if r.warnings > 0 {
+			line += fmt.Sprintf(" · warnings %d", r.warnings)
+		}
+		return line
 	}
 	// Each label gets a semantic colour — Findings white, refuted red, duplicate a
 	// dim gold, filtered peach, final green — while every count is green and the
@@ -1091,11 +1106,15 @@ func (r *LiveRenderer) findingLineLocked() string {
 		return progressStyle(labelColor, label) + " " + progressStyle(progressColorNumberGreen, fmt.Sprintf("%d", n))
 	}
 	sep := progressGrey(" · ")
-	return "  " + seg(progressColorWhite, "Findings", f.Found) + sep +
+	line := "  " + seg(progressColorWhite, "Findings", f.Found) + sep +
 		seg(progressColorErrorRed, "refuted", f.Refuted) + sep +
 		seg(dupGold, "duplicate", f.Duplicate) + sep +
 		seg(progressColorProfile, "filtered", f.Filtered) + sep +
 		seg(progressColorNumberGreen, "final", kept)
+	if r.warnings > 0 {
+		line += sep + seg(progressColorWarnYellow, "warnings", r.warnings)
+	}
+	return line
 }
 
 func firstNonEmptyLive(values ...string) string {

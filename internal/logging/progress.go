@@ -120,6 +120,10 @@ const (
 	StageFinalize   Stage = "Finalize"
 	StageVerdict    Stage = "Verdict"
 	StageSummarize  Stage = "Summarize"
+	// StageWarning carries the run's soft failures — every entry that lands in
+	// ReviewResult.Warnings — so a degraded run is visible in the progress
+	// stream instead of only in the saved session JSON.
+	StageWarning Stage = "Warning"
 )
 
 // allStages exists for the column-width guard test.
@@ -127,7 +131,7 @@ var allStages = []Stage{
 	StageNickPit, StageModel, StageAgent, StageReview, StageChat, StageModelCheck,
 	StageRequest, StageResponse, StageReasoning, StageTool, StageResult,
 	StagePublish, StageCategorize, StageVerify, StageFinalize, StageVerdict,
-	StageSummarize,
+	StageSummarize, StageWarning,
 }
 
 // stageColumnWidth is the width of the stage column: len(StageModelCheck) and
@@ -215,6 +219,7 @@ var progressStageStyles = map[Stage]string{
 	StageSummarize:  "1;38;2;240;216;140", // pale gold
 	StagePublish:    "1;38;2;252;112;76",  // coral
 	StageResult:     "1;38;2;228;228;20",  // yellow
+	StageWarning:    "1;38;2;252;196;104", // pale orange
 }
 
 func progressStyle(code, text string) string {

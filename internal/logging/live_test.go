@@ -144,6 +144,27 @@ func TestLiveRendererFindingLifecycle(t *testing.T) {
 	if strings.Contains(line, "Code Quality") || strings.Contains(line, "Security") {
 		t.Errorf("finding line should not mention reviewers: %s", line)
 	}
+	if strings.Contains(line, "warnings") {
+		t.Errorf("clean run should not show a warnings counter: %s", line)
+	}
+}
+
+// The warnings counter is absent until the run has a soft failure, then shows
+// the count only — the texts belong to the result footer.
+func TestLiveRendererWarningCounterAppearsOnFirstWarning(t *testing.T) {
+	r := testLiveRenderer(time.Now())
+	r.Progress(ProgressInfo{}, WorkflowScope{}, StageWarning, StateWarn, "Testing reviewer partial result: boom", time.Time{})
+	r.Progress(ProgressInfo{}, WorkflowScope{}, StageWarning, StateWarn, "Verdict failed: boom", time.Time{})
+
+	r.mu.Lock()
+	line := r.findingLineLocked()
+	r.mu.Unlock()
+	if !strings.Contains(line, "warnings 2") {
+		t.Errorf("finding line missing warnings counter: %s", line)
+	}
+	if strings.Contains(line, "partial result") {
+		t.Errorf("dashboard must not carry warning texts: %s", line)
+	}
 }
 
 func TestStyleLiveTargetUsesBranchPalette(t *testing.T) {

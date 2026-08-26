@@ -300,3 +300,116 @@ func TestReviewSubphaseBudgetStartsWhenSubphaseStarts(t *testing.T) {
 func modelReviewRequestWithNudges() model.ReviewRequest {
 	return model.ReviewRequest{NudgeCount: 1}
 }
+
+// A budget that slows down or aborts a run must land in the warning list the
+// result and the session carry, not only in the verbose log — and once per
+// scope, not once per call it affects.
+func TestTimeBudgetWarningsReachTheResultOncePerScope(t *testing.T) {
+	client := &urgentRecordingLLM{wait: true}
+	engine := pipelineTestEngine(client)
+	var progress bytes.Buffer
+	logger := logging.New(&progress, true, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	warnings := &warningLog{logger: logger}
+	now := time.Now()
+	ctx := withWarnings(context.Background(), warnings)
+	ctx = context.WithValue(ctx, timeBudgetContextKey{}, activeTimeBudget{
+		scope:            "lane:testing",
+		start:            now,
+		deadline:         now.Add(80 * time.Millisecond),
+		speedupThreshold: 50,
+	})
+
+	for range 2 {
+		if _, err := engine.reviewWithTimeBudget(ctx, &llm.ReviewRequest{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := warnings.list()
+	if len(got) != 1 {
+		t.Fatalf("warnings = %v, want one speed-up warning for the scope", got)
+	}
+	if !strings.HasPrefix(got[0], "Time budget speed-up threshold reached for lane:testing:") ||
+		!strings.Contains(got[0], "urgent mode") {
+		t.Errorf("warning = %q, want the scope and the urgent-mode switch", got[0])
+	}
+	if !strings.Contains(progress.String(), "Warning    warn "+got[0]) {
+		t.Errorf("progress missing the warning:\n%s", progress.String())
+	}
+}
+
+func TestTimeBudgetDeadlineWarnsOnceWhenCallsAbort(t *testing.T) {
+	engine := pipelineTestEngine(&urgentRecordingLLM{})
+	warnings := &warningLog{}
+	now := time.Now()
+	ctx, cancel := context.WithCancel(withWarnings(context.Background(), warnings))
+	cancel()
+	ctx = context.WithValue(ctx, timeBudgetContextKey{}, activeTimeBudget{
+		scope:            "step:verdict",
+		start:            now.Add(-2 * time.Second),
+		deadline:         now.Add(-time.Second),
+		speedupThreshold: 80,
+	})
+
+	engine.logTimeBudgetDeadlineIfExpired(ctx)
+	engine.logTimeBudgetDeadlineIfExpired(ctx)
+
+	got := warnings.list()
+	if len(got) != 1 {
+		t.Fatalf("warnings = %v, want one deadline warning for the scope", got)
+	}
+	if !strings.HasPrefix(got[0], "Time budget deadline reached for step:verdict:") ||
+		!strings.Contains(got[0], "call aborted") {
+		t.Errorf("warning = %q, want the scope and the aborted call", got[0])
+	}
+}
+
+// A nudge phase cut short by its budget leaves the reviewer's run status OK, so
+// the truncation is only visible if it is warned about explicitly.
+func TestNudgePhaseStoppedByBudgetWarns(t *testing.T) {
+	warnings := &warningLog{}
+	ctx := withWarnings(context.Background(), warnings)
+
+	warnNudgePhaseStopped(ctx, "Testing", "nudging", 1, 3)
+
+	got := warnings.list()
+	if len(got) != 1 || !strings.Contains(got[0], "Nudge phase stopped by time budget for Testing reviewer: completed=1/3 nudges") {
+		t.Fatalf("warnings = %v, want the truncated nudge phase", got)
+	}
+}
+
+// A failed LLM call is progress-only: the stream must not report it as "done",
+// and — because the caller may retry and succeed — it must not become a
+// warning in the result or the saved session.
+func TestFailedLLMCallReportsErrorOnProgressButRecordsNoWarning(t *testing.T) {
+	callErr := errors.New("reading stream: context deadline exceeded")
+	engine := pipelineTestEngine(&urgentRecordingLLM{err: callErr})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	warnings := &warningLog{logger: logger}
+	ctx := logging.WithProgressInfo(withWarnings(context.Background(), warnings),
+		engine.progressInfo("review", "Testing · Nudge 3/3", ""))
+
+	if _, err := engine.loggedReview(ctx, &llm.ReviewRequest{}, nil); !errors.Is(err, callErr) {
+		t.Fatalf("error = %v, want %v", err, callErr)
+	}
+
+	got := progress.String()
+	if !strings.Contains(got, "error=reading stream: context deadline exceeded") {
+		t.Errorf("progress missing the call error:\n%s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "Response") && strings.Contains(line, " done") {
+			t.Errorf("failed call reported as done: %q", line)
+		}
+	}
+	if w := warnings.list(); len(w) != 0 {
+		t.Errorf("warnings = %v, want none for a retryable call failure", w)
+	}
+}

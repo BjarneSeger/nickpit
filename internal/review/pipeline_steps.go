@@ -105,7 +105,7 @@ func (e *Engine) collectStepFunc() stepFunc {
 		st.contextReasoning = contextResult.reasoningEffort
 		st.contextErr = contextErr
 		if contextErr != nil {
-			st.warnings = append(st.warnings, fmt.Sprintf("Context agent failed: %v; continuing with degraded context", contextErr))
+			st.warnings.addf("Context agent failed: %v; continuing with degraded context", contextErr)
 		}
 		st.promptsReady = false
 		st.mu.Unlock()
@@ -400,7 +400,7 @@ func (e *Engine) verifyStepFunc(findingsFrom []string) stepFunc {
 		st.categorizeUsage = addTokenUsage(st.categorizeUsage, telemetry.CategorizeUsage)
 		st.verifyUsage = addTokenUsage(st.verifyUsage, telemetry.VerifyUsage)
 		st.verificationToolCalls += telemetry.VerifyToolCalls
-		st.warnings = append(st.warnings, warnings...)
+		st.warnings.add(warnings...)
 		st.mu.Unlock()
 		if err != nil {
 			sc.Engine.logf(ctx, "Verifier failed before merge: categorize_tokens=%s verify_tokens=%s warnings=%d error=%v", model.HumanTokens(telemetry.CategorizeUsage.TotalTokens), model.HumanTokens(telemetry.VerifyUsage.TotalTokens), len(warnings), err)
@@ -433,7 +433,7 @@ func (e *Engine) verifyVectorStepFunc(vectorID string) stepFunc {
 		st.categorizeUsage = addTokenUsage(st.categorizeUsage, telemetry.CategorizeUsage)
 		st.verifyUsage = addTokenUsage(st.verifyUsage, telemetry.VerifyUsage)
 		st.verificationToolCalls += telemetry.VerifyToolCalls
-		st.warnings = append(st.warnings, warnings...)
+		st.warnings.add(warnings...)
 		st.mu.Unlock()
 		if err != nil {
 			sc.Engine.logf(ctx, "Verifier failed for reviewer: reviewer=%s categorize_tokens=%s verify_tokens=%s warnings=%d error=%v", vector.name, model.HumanTokens(telemetry.CategorizeUsage.TotalTokens), model.HumanTokens(telemetry.VerifyUsage.TotalTokens), len(warnings), err)
@@ -562,7 +562,7 @@ func (e *Engine) mergeStepFunc(findingsFrom []string) stepFunc {
 		st.mu.Lock()
 		st.mergeRuns = append(st.mergeRuns, mergeRuns...)
 		st.mergeReasoning = mergeResult.reasoningEffort
-		st.warnings = append(st.warnings, warnings...)
+		st.warnings.add(warnings...)
 		st.result = &model.ReviewResult{
 			Findings:               filtered,
 			OverallCorrectness:     mergeResult.resp.OverallCorrectness,
@@ -648,7 +648,7 @@ func (e *Engine) postMergeFusedStepFunc(fused postMergeFusedSpec) stepFunc {
 			}
 			st.mu.Lock()
 			st.mergeRuns = append(st.mergeRuns, mergeResult.run)
-			st.warnings = append(st.warnings, warning)
+			st.warnings.add(warning)
 			st.result = &model.ReviewResult{
 				Findings:               nil,
 				OverallCorrectness:     mergeResult.resp.OverallCorrectness,
@@ -890,10 +890,12 @@ func (e *Engine) postMergeFusedStepFunc(fused postMergeFusedSpec) stepFunc {
 		st.summarizeRuns = append(st.summarizeRuns, summarizeRuns...)
 		st.finalizeUsage = addTokenUsage(st.finalizeUsage, finalizeUsage)
 		st.summarizeUsage = addTokenUsage(st.summarizeUsage, summarizeUsage)
-		st.warnings = append(st.warnings, finalizeWarnings...)
-		st.warnings = append(st.warnings, summarizeWarnings...)
-		st.warnings = append(st.warnings, verdictWarnings...)
-		st.warnings = append(st.warnings, overallSummarizeWarnings...)
+		// Already surfaced by the shard helpers as they failed; recorded here
+		// so the persisted list keeps cluster order.
+		st.warnings.record(finalizeWarnings...)
+		st.warnings.record(summarizeWarnings...)
+		st.warnings.record(verdictWarnings...)
+		st.warnings.record(overallSummarizeWarnings...)
 		st.result = verdict
 		st.mu.Unlock()
 		return nil
@@ -1065,7 +1067,10 @@ func runFinalizeShard(ctx context.Context, sc *stepContext, st *PipelineState, i
 		run.Role = "finalize"
 		run.Status = model.AgentRunStatusFailed
 		run.Error = err.Error()
-		return in, &run, []string{fmt.Sprintf("Finalize failed: %v; using verified result", err)}
+		sc.Engine.logRunWarning(run)
+		warning := fmt.Sprintf("Finalize failed: %v; using verified result", err)
+		sc.Engine.logWarning(warning)
+		return in, &run, []string{warning}
 	}
 	warnings := append([]string(nil), finalized.Warnings...)
 	finalized.Warnings = nil
@@ -1076,7 +1081,9 @@ func filterFinalizedByDisplayPriority(ctx context.Context, sc *stepContext, in *
 	filtered, dropped, err := filterResultByDisplayPriority(in, sc.Req.PriorityThreshold)
 	if err != nil {
 		sc.Engine.logf(ctx, "Finalize priority filter failed, keeping unfiltered shard: error=%v", err)
-		return in, []string{fmt.Sprintf("Finalize priority filter failed: %v; keeping unfiltered result", err)}
+		warning := fmt.Sprintf("Finalize priority filter failed: %v; keeping unfiltered result", err)
+		sc.Engine.logWarning(warning)
+		return in, []string{warning}
 	}
 	if dropped > 0 {
 		sc.Engine.logf(ctx, "Finalize priority filter: dropped=%d kept=%d threshold=%s", dropped, len(filtered.Findings), priorityThresholdLabel(sc.Req.PriorityThreshold))
@@ -1106,7 +1113,10 @@ func runVerdictShard(ctx context.Context, sc *stepContext, st *PipelineState, in
 		run.Role = "verdict"
 		run.Status = model.AgentRunStatusFailed
 		run.Error = err.Error()
-		return in, &run, []string{fmt.Sprintf("Verdict failed: %v; using merged overall fields", err)}
+		sc.Engine.logRunWarning(run)
+		warning := fmt.Sprintf("Verdict failed: %v; using merged overall fields", err)
+		sc.Engine.logWarning(warning)
+		return in, &run, []string{warning}
 	}
 	warnings := append([]string(nil), verdict.Warnings...)
 	verdict.Warnings = nil
@@ -1123,7 +1133,10 @@ func runSummarizeShard(ctx context.Context, sc *stepContext, in *model.ReviewRes
 		run.Role = "summarize"
 		run.Status = model.AgentRunStatusFailed
 		run.Error = err.Error()
-		return in, &run, []string{fmt.Sprintf("Summarize failed: %v; using finalized result", err)}
+		sc.Engine.logRunWarning(run)
+		warning := fmt.Sprintf("Summarize failed: %v; using finalized result", err)
+		sc.Engine.logWarning(warning)
+		return in, &run, []string{warning}
 	}
 	warnings := append([]string(nil), summarized.Warnings...)
 	summarized.Warnings = nil
@@ -1139,7 +1152,10 @@ func runOverallSummarize(ctx context.Context, sc *stepContext, overall string) (
 		run.Role = "summarize"
 		run.Status = model.AgentRunStatusFailed
 		run.Error = err.Error()
-		return overall, &run, []string{fmt.Sprintf("Summarize failed for overall explanation: %v; using verdict text", err)}
+		sc.Engine.logRunWarning(run)
+		warning := fmt.Sprintf("Summarize failed for overall explanation: %v; using verdict text", err)
+		sc.Engine.logWarning(warning)
+		return overall, &run, []string{warning}
 	}
 	return summary, &run, nil
 }
@@ -1307,11 +1323,12 @@ func (e *Engine) finalizeStepFunc(findingsFrom []string) stepFunc {
 				st.result = finalized
 			}
 			sc.Engine.logf(ctx, "Finalize failed, using verified result: error=%v", err)
-			st.warnings = append(st.warnings, fmt.Sprintf("Finalize failed: %v; using verified result", err))
+			st.warnings.addf("Finalize failed: %v; using verified result", err)
 			finalizeRun.Name = "finalize"
 			finalizeRun.Role = "finalize"
 			finalizeRun.Status = model.AgentRunStatusFailed
 			finalizeRun.Error = err.Error()
+			sc.Engine.logRunWarning(finalizeRun)
 			st.finalizeRuns = append(st.finalizeRuns, finalizeRun)
 			st.finalizeUsage = addTokenUsage(st.finalizeUsage, finalizeRun.TokensUsed)
 			return nil
@@ -1319,7 +1336,7 @@ func (e *Engine) finalizeStepFunc(findingsFrom []string) stepFunc {
 		// Finalize may surface a mismatch warning on the cloned result; fold it
 		// into the pipeline warnings (the executor owns Warnings assembly).
 		if len(finalized.Warnings) > 0 {
-			st.warnings = append(st.warnings, finalized.Warnings...)
+			st.warnings.add(finalized.Warnings...)
 			finalized.Warnings = nil
 		}
 		if filtered, dropped, err := filterResultByDisplayPriority(finalized, sc.Req.PriorityThreshold); err != nil {
@@ -1380,19 +1397,20 @@ func (e *Engine) verdictStepFunc(findingsFrom []string) stepFunc {
 				in = verdict
 			}
 			sc.Engine.logf(ctx, "Verdict failed, using merged overall fields: error=%v", err)
-			st.warnings = append(st.warnings, fmt.Sprintf("Verdict failed: %v; using merged overall fields", err))
+			st.warnings.addf("Verdict failed: %v; using merged overall fields", err)
 			applyVerdictFallback(in, model.PriorityThresholdRank(sc.Req.PriorityThreshold))
 			verdictRun.Name = "verdict"
 			verdictRun.Role = "verdict"
 			verdictRun.Status = model.AgentRunStatusFailed
 			verdictRun.Error = err.Error()
+			sc.Engine.logRunWarning(verdictRun)
 			st.verdictRun = &verdictRun
 			st.verdictUsage = addTokenUsage(st.verdictUsage, verdictRun.TokensUsed)
 			st.result = in
 			return nil
 		}
 		if len(verdict.Warnings) > 0 {
-			st.warnings = append(st.warnings, verdict.Warnings...)
+			st.warnings.add(verdict.Warnings...)
 			verdict.Warnings = nil
 		}
 		st.result = verdict
@@ -1455,11 +1473,12 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 		defer st.mu.Unlock()
 		if err != nil {
 			sc.Engine.logf(ctx, "Summarize failed, using finalized result: error=%v", err)
-			st.warnings = append(st.warnings, fmt.Sprintf("Summarize failed: %v; using finalized result", err))
+			st.warnings.addf("Summarize failed: %v; using finalized result", err)
 			summarizeRun.Name = "summarize"
 			summarizeRun.Role = "summarize"
 			summarizeRun.Status = model.AgentRunStatusFailed
 			summarizeRun.Error = err.Error()
+			sc.Engine.logRunWarning(summarizeRun)
 			st.summarizeRuns = append(st.summarizeRuns, summarizeRun)
 			st.summarizeUsage = addTokenUsage(st.summarizeUsage, summarizeRun.TokensUsed)
 			return nil
@@ -1467,7 +1486,7 @@ func (e *Engine) summarizeStepFunc(findingsFrom []string) stepFunc {
 		// Fold any mismatch warning the summarizer surfaced on the cloned result
 		// into the pipeline warnings (the executor owns Warnings assembly).
 		if len(summarized.Warnings) > 0 {
-			st.warnings = append(st.warnings, summarized.Warnings...)
+			st.warnings.add(summarized.Warnings...)
 			summarized.Warnings = nil
 		}
 		st.result = summarized
