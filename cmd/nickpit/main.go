@@ -3424,6 +3424,9 @@ func reviewResultSummary(result *model.ReviewResult) string {
 		fmt.Sprintf("completion_tokens=%s", model.HumanTokens(result.TokensUsed.CompletionTokens)),
 		fmt.Sprintf("total_tokens=%s", model.HumanTokens(result.TokensUsed.TotalTokens)),
 	}
+	if len(result.Warnings) > 0 {
+		parts = append(parts, fmt.Sprintf("warnings=%d", len(result.Warnings)))
+	}
 	if result.RuntimeSeconds > 0 {
 		parts = append(parts, fmt.Sprintf("runtime=%s", model.HumanDuration(time.Duration(result.RuntimeSeconds*float64(time.Second)))))
 	}

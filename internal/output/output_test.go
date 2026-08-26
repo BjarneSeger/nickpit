@@ -376,6 +376,9 @@ func TestWarningType(t *testing.T) {
 		{"No verified findings remained; skipped merge agent", "Merge"},
 		{"Merge Findings merge step failed: upstream", "Merge"},
 		{`Skipped lane "security" because its time budget was exhausted`, "Workflow"},
+		{"Time budget speed-up threshold reached for lane:testing: elapsed=1m", "Budget"},
+		{"Time budget deadline reached for step:verdict: overrun=3s; call aborted", "Budget"},
+		{"Nudge phase stopped by time budget for Testing reviewer: completed=1/3 nudges", "Budget"},
 		{"confidence threshold 0.70 is configured but workflow has no verdict step", "Configuration"},
 		{"unrecognized warning text", "Other"},
 	}

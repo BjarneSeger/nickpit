@@ -299,6 +299,7 @@ func (e *Engine) RunSpecPipeline(ctx context.Context, p *Pipeline, req model.Rev
 				Warnings:               []string{allChangedFilesFilteredWarning},
 			}
 			e.applyResultMetadata(result, req, reviewCtx)
+			e.logProgress(logging.StageWarning, logging.StateWarn, allChangedFilesFilteredWarning)
 			return result, reviewCtx, nil
 		}
 	} else {
@@ -1056,26 +1057,35 @@ func allVectorsFailed(results []agentResult) bool {
 	return true
 }
 
+// agentRunWarning renders the top-level warning for a soft agent failure, or
+// "" when the run carries none. A skipped run is deliberately silent here: the
+// step that skipped it warns with the reason it had, which is more specific
+// than anything the run itself records.
+func agentRunWarning(run model.AgentRun) string {
+	actor := "reviewer"
+	if run.Role == "merge" {
+		actor = "merge step"
+	}
+	switch run.Status {
+	case model.AgentRunStatusFailed:
+		return fmt.Sprintf("%s %s failed: %s", run.Name, actor, run.Error)
+	case model.AgentRunStatusPartial:
+		return fmt.Sprintf("%s %s partial result: %s", run.Name, actor, run.Error)
+	}
+	return ""
+}
+
 // appendAgentRunWarnings folds AgentRun-level failures into the top-level
 // warnings list. Failures already surfaced via contextErr above are skipped to
-// avoid duplicates.
+// avoid duplicates. The progress stream already carried these at the moment
+// they happened (logRunWarning); this is the persisted view.
 func appendAgentRunWarnings(warnings []string, runs []model.AgentRun, contextErr error) []string {
 	for _, run := range runs {
-		if run.Status == model.AgentRunStatusOK {
-			continue
-		}
 		if run.Role == "context" && contextErr != nil {
 			continue
 		}
-		actor := "reviewer"
-		if run.Role == "merge" {
-			actor = "merge step"
-		}
-		switch run.Status {
-		case model.AgentRunStatusFailed:
-			warnings = append(warnings, fmt.Sprintf("%s %s failed: %s", run.Name, actor, run.Error))
-		case model.AgentRunStatusPartial:
-			warnings = append(warnings, fmt.Sprintf("%s %s partial result: %s", run.Name, actor, run.Error))
+		if warning := agentRunWarning(run); warning != "" {
+			warnings = append(warnings, warning)
 		}
 	}
 	return warnings
@@ -1216,17 +1226,14 @@ func (e *Engine) runDedupeAgent(ctx context.Context, userPrompt string, contextN
 	result, err := e.callDedupeAgent(ctx, userPrompt, contextNotes, input, schema, constraints, req, styleGuides, hasToolchainVersions)
 	run := result.run
 	if err != nil {
-		run = markDedupeRun(run, model.AgentRunStatusFailed, err)
-		return nil, run
+		return nil, e.failDedupeRun(run, model.AgentRunStatusFailed, err)
 	}
 	if result.resp == nil {
 		err := fmt.Errorf("dedupe agent returned no response")
-		run = markDedupeRun(run, model.AgentRunStatusFailed, err)
-		return nil, run
+		return nil, e.failDedupeRun(run, model.AgentRunStatusFailed, err)
 	}
 	if invalid := validateDedupeResponse(result.resp, input.resp); invalid != nil {
-		run = markDedupeRun(run, model.AgentRunStatusPartial, invalid)
-		return nil, run
+		return nil, e.failDedupeRun(run, model.AgentRunStatusPartial, invalid)
 	}
 	resp := cloneReviewResponse(result.resp)
 	// The dedupe agent shares the merge output schema, so a model may emit
@@ -1295,6 +1302,14 @@ func (e *Engine) callDedupeAgent(ctx context.Context, userPrompt string, context
 			return validateDedupeResponse(resp, input.resp)
 		},
 	}, req)
+}
+
+// failDedupeRun marks a soft dedupe failure and surfaces it on the progress
+// stream right away, instead of leaving it to the end-of-run warning list.
+func (e *Engine) failDedupeRun(run model.AgentRun, status string, err error) model.AgentRun {
+	run = markDedupeRun(run, status, err)
+	e.logRunWarning(run)
+	return run
 }
 
 func markDedupeRun(run model.AgentRun, status string, err error) model.AgentRun {
@@ -1432,16 +1447,16 @@ func (e *Engine) runClusterMergeAgent(ctx context.Context, userPrompt string, co
 	result, err := e.callClusterMergeAgent(ctx, userPrompt, contextNotes, cluster, reviewerByID, schema, constraints, req, styleGuides, hasToolchainVersions, shardLabel)
 	run := result.run
 	if err != nil {
-		return cluster, markMergeRun(run, model.AgentRunStatusFailed, err)
+		return cluster, e.failMergeRun(run, model.AgentRunStatusFailed, err)
 	}
 	if result.resp == nil {
-		return cluster, markMergeRun(run, model.AgentRunStatusFailed, fmt.Errorf("merge step returned no response"))
+		return cluster, e.failMergeRun(run, model.AgentRunStatusFailed, fmt.Errorf("merge step returned no response"))
 	}
 	if repaired := repairClusterMergeProvenance(result.resp, cluster); repaired > 0 {
 		e.logf(ctx, "Merge provenance repair: repaired=%d", repaired)
 	}
 	if invalid := validateClusterMergeResponse(result.resp, cluster); invalid != nil {
-		return cluster, markMergeRun(run, model.AgentRunStatusPartial, invalid)
+		return cluster, e.failMergeRun(run, model.AgentRunStatusPartial, invalid)
 	}
 	findings := cloneReviewResponse(result.resp).Findings
 	stripMergedFrom(findings)
@@ -1493,6 +1508,14 @@ func maxOverallConfidence(inputs []pairwiseMergeInput) float64 {
 		}
 	}
 	return out
+}
+
+// failMergeRun marks a soft merge failure and surfaces it on the progress
+// stream right away, instead of leaving it to the end-of-run warning list.
+func (e *Engine) failMergeRun(run model.AgentRun, status string, err error) model.AgentRun {
+	run = markMergeRun(run, status, err)
+	e.logRunWarning(run)
+	return run
 }
 
 func markMergeRun(run model.AgentRun, status string, err error) model.AgentRun {
@@ -3590,7 +3613,15 @@ func (e *Engine) loggedReview(ctx context.Context, req *llm.ReviewRequest, sec *
 		if resp != nil && resp.Reasoned {
 			e.logger.Progress(turnCtx, logging.StageReasoning, logging.StateDone, elapsed.String())
 		}
-		e.logger.Progress(turnCtx, logging.StageResponse, logging.StateDone, elapsed.String())
+		// A call that errored must not report "done": the caller may retry and
+		// succeed, in which case the failure is progress-only and never becomes
+		// a warning — but it still happened, and the stream is the only place
+		// it can be seen.
+		if err != nil {
+			e.logger.Progress(turnCtx, logging.StageResponse, logging.StateError, fmt.Sprintf("%s error=%v", elapsed, err))
+		} else {
+			e.logger.Progress(turnCtx, logging.StageResponse, logging.StateDone, elapsed.String())
+		}
 	}
 	return resp, err
 }
@@ -3635,19 +3666,23 @@ func (e *Engine) logTimeBudgetUrgentNow(ctx context.Context) {
 	budget, ok := timeBudgetFromContext(ctx)
 	if !ok {
 		e.logf(ctx, "Workflow time budget speed-up threshold already reached; sending urgent request")
+		warnTimeBudgetSpeedup(ctx, activeTimeBudget{}, false)
 		return
 	}
 	now := time.Now()
 	e.logf(ctx, "Workflow time budget speed-up threshold already reached: scope=%s elapsed=%s limit=%s; sending urgent request",
 		budget.scope, model.HumanWait(timeBudgetElapsed(budget, now)), model.HumanWait(timeBudgetLimit(budget)))
+	warnTimeBudgetSpeedup(ctx, budget, true)
 }
 
 func (e *Engine) logTimeBudgetRetry(ctx context.Context, firstErr error, softErr error) {
 	budget, ok := timeBudgetFromContext(ctx)
 	if !ok {
 		e.logf(ctx, "Workflow time budget speed-up threshold reached; retrying urgently first_error=%v soft_err=%v", firstErr, softErr)
+		warnTimeBudgetSpeedup(ctx, activeTimeBudget{}, false)
 		return
 	}
+	warnTimeBudgetSpeedup(ctx, budget, true)
 	now := time.Now()
 	e.logf(ctx, "Workflow time budget speed-up threshold reached: scope=%s elapsed=%s limit=%s remaining=%s; retrying urgently first_error=%v soft_err=%v",
 		budget.scope, model.HumanWait(timeBudgetElapsed(budget, now)), model.HumanWait(timeBudgetLimit(budget)), model.HumanWait(timeBudgetRemaining(budget, now)), firstErr, softErr)
@@ -3667,6 +3702,26 @@ func (e *Engine) logTimeBudgetDeadlineIfExpired(ctx context.Context) {
 	}
 	e.logf(ctx, "Workflow time budget deadline reached: scope=%s elapsed=%s limit=%s overrun=%s; call aborted",
 		budget.scope, model.HumanWait(timeBudgetElapsed(budget, now)), model.HumanWait(timeBudgetLimit(budget)), model.HumanWait(timeBudgetOverrun(budget, now)))
+	// One warning per scope: the deadline aborts every remaining call of that
+	// scope, and a warning per aborted call would bury the rest of the list.
+	warningsFromContext(ctx).once("time-budget-deadline:"+budget.scope,
+		"Time budget deadline reached for %s: elapsed=%s limit=%s overrun=%s; call aborted",
+		budget.scope, model.HumanWait(timeBudgetElapsed(budget, now)), model.HumanWait(timeBudgetLimit(budget)), model.HumanWait(timeBudgetOverrun(budget, now)))
+}
+
+// warnTimeBudgetSpeedup reports that a scope crossed its speed-up threshold and
+// switched to urgent requests. Every later call in the scope crosses it too, so
+// the warning is reported once per scope.
+func warnTimeBudgetSpeedup(ctx context.Context, budget activeTimeBudget, known bool) {
+	if !known {
+		warningsFromContext(ctx).once("time-budget-speedup:unknown",
+			"Time budget speed-up threshold reached; requests switched to urgent mode")
+		return
+	}
+	now := time.Now()
+	warningsFromContext(ctx).once("time-budget-speedup:"+budget.scope,
+		"Time budget speed-up threshold reached for %s: elapsed=%s limit=%s remaining=%s; requests switched to urgent mode",
+		budget.scope, model.HumanWait(timeBudgetElapsed(budget, now)), model.HumanWait(timeBudgetLimit(budget)), model.HumanWait(timeBudgetRemaining(budget, now)))
 }
 
 func (e *Engine) openReviewRequestReasoningSection(info logging.ProgressInfo, callNum int) *logging.ReasoningSection {
@@ -3708,6 +3763,31 @@ func (e *Engine) progressInfo(role, name, detail string) logging.ProgressInfo {
 func (e *Engine) logProgress(stage logging.Stage, state logging.State, msg string) {
 	if e.logger != nil {
 		e.logger.ProgressFor(e.progressInfo("", "", ""), stage, state, msg)
+	}
+}
+
+// logWarning surfaces a soft failure on the progress stream at the moment it
+// happens. Callers must still record the same text in the run's warning list
+// (warningLog.record) so it survives into the result and the session JSON.
+func (e *Engine) logWarning(warning string) {
+	e.logProgress(logging.StageWarning, logging.StateWarn, warning)
+}
+
+// logWarnings surfaces several warnings at once, for helpers that hand their
+// warnings back to a caller that records them later.
+func (e *Engine) logWarnings(warnings []string) {
+	for _, warning := range warnings {
+		e.logWarning(warning)
+	}
+}
+
+// logRunWarning surfaces a soft agent failure on the progress stream at the
+// moment the run is marked, rather than leaving it for the result footer's
+// count and the saved session JSON. assemble folds the same text into
+// ReviewResult.Warnings afterwards.
+func (e *Engine) logRunWarning(run model.AgentRun) {
+	if warning := agentRunWarning(run); warning != "" {
+		e.logProgress(logging.StageWarning, logging.StateWarn, warning)
 	}
 }
 

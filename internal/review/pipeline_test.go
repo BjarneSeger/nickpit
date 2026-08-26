@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1746,5 +1747,54 @@ func TestShardProgressName(t *testing.T) {
 	}
 	if got := shardProgressName("Merge", "  "); got != "" {
 		t.Fatalf("blank label should yield empty, got %q", got)
+	}
+}
+
+// Soft failures reach the user through the progress stream at the moment they
+// happen — a lane that dies 3 minutes before the run assembles its result must
+// not stay invisible until the footer's warning count.
+func TestPipelineSurfacesWarningsWhenTheyHappen(t *testing.T) {
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine := &Engine{}
+	engine.SetLogger(logger)
+
+	st := newPipelineState(&model.ReviewContext{}, nil)
+	st.warnings.logger = logger
+	st.result = &model.ReviewResult{}
+
+	st.addWarningf("Skipped review:%s because its main phase time budget was exhausted", "architecture")
+	partial := agentResult{run: model.AgentRun{
+		Name:   "Testing",
+		Role:   "review",
+		Status: model.AgentRunStatusPartial,
+		Error:  "nudge 3: llm: reading stream: context deadline exceeded",
+	}}
+	st.setGroup("testing", partial, nil)
+
+	beforeAssemble := progress.String()
+	for _, want := range []string{
+		"Warning    warn Skipped review:architecture because its main phase time budget was exhausted",
+		"Warning    warn Testing reviewer partial result: nudge 3: llm: reading stream: context deadline exceeded",
+	} {
+		if !strings.Contains(beforeAssemble, want) {
+			t.Errorf("progress missing %q before assembly:\n%s", want, beforeAssemble)
+		}
+	}
+
+	// A nudge step re-sets the group on every turn; the same failure must not
+	// be reported again.
+	st.setGroup("testing", partial, nil)
+	if got := strings.Count(progress.String(), "partial result"); got != 1 {
+		t.Errorf("partial-result warning surfaced %d times, want 1:\n%s", got, progress.String())
+	}
+
+	result := (&Pipeline{engine: engine}).assemble(st, model.ReviewRequest{})
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want the budget skip and the partial run", result.Warnings)
+	}
+	if progress.String() != beforeAssemble {
+		t.Errorf("assembly re-emitted warnings:\n%s", strings.TrimPrefix(progress.String(), beforeAssemble))
 	}
 }

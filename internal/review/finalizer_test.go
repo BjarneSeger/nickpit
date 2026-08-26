@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/dgrieser/nickpit/internal/config"
 	"github.com/dgrieser/nickpit/internal/llm"
+	"github.com/dgrieser/nickpit/internal/logging"
 	"github.com/dgrieser/nickpit/internal/model"
 )
 
@@ -1540,5 +1542,41 @@ func TestPriorityFloorNonFindingCappedAtNonBlocking(t *testing.T) {
 		if got := priorityFloor(nonFinding, model.PriorityThresholdRank(threshold)); got != want {
 			t.Fatalf("threshold %s: non-finding floor = %d, want %d", threshold, got, want)
 		}
+	}
+}
+
+// A fused post-merge shard that succeeds can still return a warning. Those are
+// recorded in cluster order after the barrier, so the shard helper itself must
+// surface them — otherwise they reach the progress stream and the live counter
+// only once the run is over, if at all.
+func TestFinalizeShardSurfacesMismatchWarningWhenItHappens(t *testing.T) {
+	locA := model.CodeLocation{FilePath: "a.go", LineRange: model.LineRange{Start: 1, End: 1}}
+	llmClient := &capturingLLM{
+		resps: []*llm.ReviewResponse{
+			{Findings: nil, OverallCorrectness: "patch is correct"},
+			{Findings: nil, OverallCorrectness: "patch is correct"},
+		},
+	}
+	engine := NewEngine(stubSource{}, llmClient, stubRetrieval{}, config.Profile{Model: "test"})
+	var progress bytes.Buffer
+	logger := logging.New(&progress, false, false)
+	logger.SetShowProgress(true)
+	engine.SetLogger(logger)
+
+	st := newPipelineState(sampleReviewCtx(), nil)
+	sc := engine.stepContext(nil, model.ReviewRequest{MaxOutputRetries: 1})
+	in := &model.ReviewResult{Findings: []model.Finding{
+		{Title: "Issue A", Body: "a", Priority: intPtr(2), CodeLocation: locA},
+	}}
+
+	_, run, warnings := runFinalizeShard(context.Background(), sc, st, in, "#1")
+	if run == nil || run.Status == model.AgentRunStatusFailed {
+		t.Fatalf("run = %#v, want a successful shard", run)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "Finalizer output mismatch") {
+		t.Fatalf("warnings = %#v, want the finalizer mismatch warning", warnings)
+	}
+	if got := progress.String(); !strings.Contains(got, "Warning    [test] warn "+warnings[0]) {
+		t.Errorf("progress missing the shard warning:\n%s", got)
 	}
 }

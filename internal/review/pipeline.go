@@ -72,7 +72,115 @@ type PipelineState struct {
 	finalizeUsage         model.TokenUsage
 	verdictUsage          model.TokenUsage
 	summarizeUsage        model.TokenUsage
-	warnings              []string
+
+	// warnings carries the run's soft failures. It has its own lock so steps
+	// can record one while holding mu, and it emits each warning on the
+	// progress stream the moment it is recorded.
+	warnings *warningLog
+}
+
+// warningLog accumulates the soft failures of a run — a reviewer that died
+// mid-nudge, a budget-skipped step, a finalizer mismatch — and surfaces each
+// one on the progress stream as it happens. The result footer's count and the
+// saved session JSON are the after-the-fact view of the same list.
+//
+// It locks independently of PipelineState.mu: several steps record warnings
+// from inside their own critical section, and warningLog never reaches back
+// into PipelineState, so the two locks cannot interleave.
+type warningLog struct {
+	mu     sync.Mutex
+	logger *logging.Logger
+	info   logging.ProgressInfo
+	items  []string
+	// seen keys the warnings reported through once, so a condition that
+	// re-triggers on every LLM call of a scope — a time budget past its
+	// speed-up threshold, say — is reported once instead of dozens of times.
+	seen map[string]bool
+}
+
+type warningsContextKey struct{}
+
+// withWarnings puts the run's warning log on the context so engine internals
+// that have no pipeline state — the time-budget helpers, the reviewer session —
+// can report a soft failure into the same list the result carries.
+func withWarnings(ctx context.Context, warnings *warningLog) context.Context {
+	return context.WithValue(ctx, warningsContextKey{}, warnings)
+}
+
+// warningsFromContext returns the run's warning log, or nil outside a pipeline
+// run. Every warningLog method is nil-safe, so callers need no guard.
+func warningsFromContext(ctx context.Context) *warningLog {
+	warnings, _ := ctx.Value(warningsContextKey{}).(*warningLog)
+	return warnings
+}
+
+func (w *warningLog) addf(format string, args ...any) {
+	w.add(fmt.Sprintf(format, args...))
+}
+
+// add records warnings and surfaces them on the progress stream. Every warning
+// must be surfaced exactly once: use add at the site that produces it, and
+// record for warnings a helper already surfaced at its own failure point.
+func (w *warningLog) add(warnings ...string) {
+	if w == nil || len(warnings) == 0 {
+		return
+	}
+	w.record(warnings...)
+	for _, warning := range warnings {
+		w.surface(warning)
+	}
+}
+
+// once records and surfaces a warning the first time its key is seen. Use it
+// for conditions that re-trigger per call within one scope; key on the scope so
+// the run reports the condition, not every occurrence of it.
+func (w *warningLog) once(key string, format string, args ...any) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.seen[key] {
+		w.mu.Unlock()
+		return
+	}
+	if w.seen == nil {
+		w.seen = make(map[string]bool)
+	}
+	w.seen[key] = true
+	w.mu.Unlock()
+	w.addf(format, args...)
+}
+
+// surface emits a warning that is recorded elsewhere — AgentRun failures are
+// folded into the result list by appendAgentRunWarnings at assembly time, but
+// the user needs to see them when they happen.
+func (w *warningLog) surface(warning string) {
+	if w == nil || warning == "" {
+		return
+	}
+	w.logger.ProgressFor(w.info, logging.StageWarning, logging.StateWarn, warning)
+}
+
+// record stores warnings that were already surfaced at their origin — the
+// sharded finalize/verdict/summarize helpers emit as they fail, but their
+// warnings are collected per cluster index so the persisted list keeps a
+// deterministic order rather than a goroutine-completion one.
+func (w *warningLog) record(warnings ...string) {
+	if w == nil || len(warnings) == 0 {
+		return
+	}
+	w.mu.Lock()
+	w.items = append(w.items, warnings...)
+	w.mu.Unlock()
+}
+
+func (w *warningLog) list() []string {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.items...)
 }
 
 type groupEntry struct {
@@ -80,6 +188,10 @@ type groupEntry struct {
 	result  agentResult
 	session *reviewerSession
 	filled  bool
+	// warned is the last run warning surfaced for this group. Nudge steps
+	// re-set the group on every turn, so the same soft failure must not be
+	// reported again and again.
+	warned string
 }
 
 func newPipelineState(reviewCtx *model.ReviewContext, reviewOrder []string) *PipelineState {
@@ -87,6 +199,7 @@ func newPipelineState(reviewCtx *model.ReviewContext, reviewOrder []string) *Pip
 		Base:      reviewCtx,
 		Enriched:  reviewCtx,
 		groupByID: make(map[string]*groupEntry),
+		warnings:  &warningLog{},
 	}
 	for _, id := range reviewOrder {
 		st.groupByID[id] = &groupEntry{id: id}
@@ -109,12 +222,17 @@ func (st *PipelineState) setGroup(id string, result agentResult, session *review
 		g.session = session
 	}
 	g.filled = true
+	// A lane's soft failure (a reviewer that died mid-nudge, an invalid
+	// response kept as a partial) reaches the result list only at assembly;
+	// surface it here, when it happens.
+	if warning := agentRunWarning(result.run); warning != "" && warning != g.warned {
+		g.warned = warning
+		st.warnings.surface(warning)
+	}
 }
 
 func (st *PipelineState) addWarningf(format string, args ...any) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.warnings = append(st.warnings, fmt.Sprintf(format, args...))
+	st.warnings.addf(format, args...)
 }
 
 func (st *PipelineState) group(id string) *groupEntry {
@@ -356,11 +474,16 @@ func fusedSpecFromPipeline(entry workflow.StepEntry) postMergeFusedSpec {
 // result and the (possibly enriched) context.
 func (p *Pipeline) Run(ctx context.Context, reviewCtx *model.ReviewContext, req model.ReviewRequest) (*model.ReviewResult, *model.ReviewContext, error) {
 	st := newPipelineState(reviewCtx, p.reviewOrder)
+	st.warnings.logger = p.engine.logger
+	st.warnings.info = p.engine.progressInfo("", "", "")
 	st.limiter = NewLimiter(req.Concurrency)
 	st.diffFormat = req.DiffFormat
 	// Every agent loop in this run acquires admission from the same limiter,
 	// capping LLM concurrency globally (reviewers, verify, dedupe, merge, ...).
 	ctx = WithLimiter(ctx, st.limiter)
+	// Engine internals with no access to the pipeline state report warnings
+	// through the context-carried log.
+	ctx = withWarnings(ctx, st.warnings)
 	var segments []model.SegmentRuntime
 	for unitIdx, unit := range p.units {
 		unitStart := time.Now()
@@ -526,7 +649,7 @@ func (p *Pipeline) assemble(st *PipelineState, req model.ReviewRequest) *model.R
 	}
 	allRuns, usage, toolCalls, reasoning := st.aggregateTelemetry()
 	res.AgentRuns = allRuns
-	res.Warnings = appendAgentRunWarnings(st.warnings, allRuns, st.contextErr)
+	res.Warnings = appendAgentRunWarnings(st.warnings.list(), allRuns, st.contextErr)
 	// Classifier and verifier calls are tracked as phase telemetry rather than
 	// AgentRuns, but they still count toward the review's total model spend and
 	// tool-call total.

@@ -171,6 +171,9 @@ func warningType(warning string) string {
 	switch {
 	case strings.HasPrefix(warning, "publish failed"):
 		return "Publish"
+	case strings.HasPrefix(warning, "time budget "),
+		strings.HasPrefix(warning, "nudge phase "):
+		return "Budget"
 	case strings.HasPrefix(warning, "verify "):
 		return "Verify"
 	case strings.HasPrefix(warning, "context "),

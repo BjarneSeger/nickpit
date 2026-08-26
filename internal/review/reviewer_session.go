@@ -291,6 +291,16 @@ func (e *Engine) reviewerComputeExtractDelta(ctx context.Context, s *reviewerSes
 // rounds; the reasoning effort baseline is reset once (lazily) then carried
 // forward. Returns false (and records nudgeErr) when the round fails, so callers
 // stop and keep the prior findings as a partial result.
+// warnNudgePhaseStopped reports a reviewer whose nudge rounds were cut short by
+// a phase time budget. The reviewer itself still succeeds — it simply reviewed
+// less than the workflow asked for — so without this the truncation shows up
+// nowhere: not in the progress stream, not in the result, not in the session.
+func warnNudgePhaseStopped(ctx context.Context, reviewer, phase string, completed, total int) {
+	warningsFromContext(ctx).addf(
+		"Nudge phase stopped by time budget for %s reviewer: completed=%d/%d nudges (%s budget exhausted)",
+		reviewer, completed, total, phase)
+}
+
 func (e *Engine) reviewerNudgeTurn(nudgeCtx context.Context, s *reviewerSession, iterIdx, total int, nudgeName, formattedReasoningFindings string, req model.ReviewRequest) bool {
 	if s.nudgeState == nil {
 		s.nudgeState = newAgentLoopState()
@@ -406,6 +416,7 @@ func (e *Engine) reviewerNudges(ctx context.Context, s *reviewerSession, req mod
 				return fmt.Errorf("nudge phase cancelled: completed=%d/%d: %w", i, req.NudgeCount, err)
 			}
 			e.logf(ctx, "Nudge phase skipped or stopped by time budget: completed=%d/%d", i, req.NudgeCount)
+			warnNudgePhaseStopped(ctx, s.agent.name, "compiling findings to nudge", i, req.NudgeCount)
 			return nil
 		}
 		nudgeName := fmt.Sprintf("%s · Nudge %d/%d", s.agent.name, i+1, req.NudgeCount)
@@ -422,6 +433,7 @@ func (e *Engine) reviewerNudges(ctx context.Context, s *reviewerSession, req mod
 				return fmt.Errorf("nudge phase cancelled: completed=%d/%d: %w", i, req.NudgeCount, err)
 			}
 			e.logf(ctx, "Nudge phase skipped or stopped by time budget: completed=%d/%d", i, req.NudgeCount)
+			warnNudgePhaseStopped(ctx, s.agent.name, "nudging", i, req.NudgeCount)
 			return nil
 		}
 		nudgeCtx := logging.WithProgressInfo(nudgeCtxBase, nudgeEngine.progressInfo(s.agent.role, nudgeName, ""))

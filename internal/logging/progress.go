@@ -120,6 +120,10 @@ const (
 	StageFinalize   Stage = "Finalize"
 	StageVerdict    Stage = "Verdict"
 	StageSummarize  Stage = "Summarize"
+	// StageWarning carries the run's soft failures — every entry that lands in
+	// ReviewResult.Warnings — so a degraded run is visible in the progress
+	// stream instead of only in the saved session JSON.
+	StageWarning Stage = "Warning"
 )
 
 // allStages exists for the column-width guard test.
@@ -127,7 +131,7 @@ var allStages = []Stage{
 	StageNickPit, StageModel, StageAgent, StageReview, StageChat, StageModelCheck,
 	StageRequest, StageResponse, StageReasoning, StageTool, StageResult,
 	StagePublish, StageCategorize, StageVerify, StageFinalize, StageVerdict,
-	StageSummarize,
+	StageSummarize, StageWarning,
 }
 
 // stageColumnWidth is the width of the stage column: len(StageModelCheck) and
@@ -192,7 +196,7 @@ const (
 )
 
 // progressStageStyles colours the stage column. Truecolor rather than the
-// xterm-256 cube: seventeen stages need more separation than the cube offers at
+// xterm-256 cube: eighteen stages need more separation than the cube offers at
 // a readable lightness, and the previous 256-colour set had pairs that were
 // practically indistinguishable (Model/Chat, Tool/Verify, ModelCheck/Response).
 // Every entry sits at L* ≥ 64 so it stays readable on a dark background, and no
@@ -204,7 +208,7 @@ var progressStageStyles = map[Stage]string{
 	StageModelCheck: "1;38;2;20;252;144",  // spring green
 	StageReview:     "1;38;2;252;152;172", // rose
 	StageChat:       "1;38;2;172;140;236", // lavender
-	StageRequest:    "1;38;2;252;168;24",  // amber
+	StageRequest:    "1;38;2;232;160;112", // apricot
 	StageReasoning:  "1;38;2;252;88;220",  // magenta
 	StageResponse:   "1;38;2;100;184;20",  // leaf green
 	StageTool:       "1;38;2;20;244;216",  // turquoise
@@ -215,6 +219,7 @@ var progressStageStyles = map[Stage]string{
 	StageSummarize:  "1;38;2;240;216;140", // pale gold
 	StagePublish:    "1;38;2;252;112;76",  // coral
 	StageResult:     "1;38;2;228;228;20",  // yellow
+	StageWarning:    "1;38;2;252;168;24",  // amber
 }
 
 func progressStyle(code, text string) string {
