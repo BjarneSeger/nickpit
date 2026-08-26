@@ -53,7 +53,7 @@ stage_row() { # NAME CODE TONE USAGE
     "$(grey "$4")"
 }
 
-# Truecolor, not the 256-colour cube: 17 stages need more room than xterm-256
+# Truecolor, not the 256-colour cube: 18 stages need more room than xterm-256
 # offers before names start looking alike. Every entry keeps L* ≥ 64 (readable on
 # a dark background) and no two are closer than ΔE*ab ≈ 25 in CIELAB — the old
 # 256-colour set had pairs as close as ΔE 8 (Model/Chat).
@@ -74,6 +74,7 @@ stage_row Verify     '1;38;2;0;172;176'   'deep teal'       'verification / refu
 stage_row Finalize   '1;38;2;100;172;108' 'sage green'    'dedupe, merge, filter'
 stage_row Verdict    '1;38;2;208;120;252' 'violet'        'overall correctness verdict'
 stage_row Summarize  '1;38;2;240;216;140' 'pale gold'     'summary generation'
+stage_row Warning    '1;38;2;232;160;112' 'apricot'       'soft failures: degraded lanes, exhausted time budgets'
 printf '  %s\n' "$(grey 'unknown stage → 1;38;5;252 (bold light grey) fallback')"
 
 ################################################################################
@@ -173,6 +174,12 @@ printf '  %s %s %s\n' \
   "$(s '1;38;2;100;184;20' "$(printf '%-10s' Response)")" \
   "$(turn 5)" \
   "$(s '38;5;203' error) $(light 'context deadline exceeded after') $(s '38;5;118' '600')$(s '38;5;71' 's')$(grey ' · ')$(s '38;5;71' '∞')"
+
+printf '  %s %s %s\n' \
+  "$(s '1;38;2;232;160;112' "$(printf '%-10s' Warning)")" \
+  "$(grey '[')$(s '38;5;37' 'Qwen3.6-480B')$(grey ':')$(s '38;5;218' 'high')$(grey ']')" \
+  "$(s '38;5;221' warn) $(light 'Testing reviewer partial result')$(grey ': ')$(light nudge) $(s '38;5;118' '3')$(grey ': ')$(light 'context deadline exceeded')"
+printf '  %s\n' "$(grey 'warnings carry no agent identity — the bracket holds the run model alone')"
 
 ################################################################################
 heading 'Live dashboard chrome'
@@ -282,6 +289,15 @@ printf '  %s%s%s%s%s\n' \
   "$(s '38;5;216' 'filtered') $(s '38;5;118' '1')$(grey ' · ')" \
   "$(s '38;5;118' 'final') $(s '38;5;118' '5')"
 printf '  %s\n' "$(grey 'findings footer — label colours are semantic, every count is green, dots grey')"
+
+printf '  %s%s%s%s%s%s\n' \
+  "$(s '38;5;255' 'Findings') $(s '38;5;118' '9')$(grey ' · ')" \
+  "$(s '38;5;203' 'refuted') $(s '38;5;118' '2')$(grey ' · ')" \
+  "$(s '38;5;179' 'duplicate') $(s '38;5;118' '1')$(grey ' · ')" \
+  "$(s '38;5;216' 'filtered') $(s '38;5;118' '1')$(grey ' · ')" \
+  "$(s '38;5;118' 'final') $(s '38;5;118' '5')$(grey ' · ')" \
+  "$(s '38;5;221' 'warnings') $(s '38;5;118' '2')"
+printf '  %s\n' "$(grey 'the warnings segment is appended only once the run has a soft failure; the texts stay in the result footer')"
 
 printf '\n'
 printf '  %s %s %s%s%s\n' \

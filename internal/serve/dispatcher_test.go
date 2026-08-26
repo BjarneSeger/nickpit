@@ -783,9 +783,20 @@ func TestDurableCleanupBackoffIsSharedAcrossBacklog(t *testing.T) {
 		keys = append(keys, key)
 		dispatcher.states[key] = &jobState{status: stateCleanup, latest: event, cleanup: &cleanup}
 	}
+	// Fill the queue before any worker can drain it. queueDurableCleanup starts
+	// one worker per *currently* queued entry, so enqueuing one at a time races
+	// the workers: a worker that pops an entry before the next enqueue keeps the
+	// queue short and the wave ends up smaller than maxAckCleanupWorkers.
+	dispatcher.mu.Lock()
+	dispatcher.cleanupMu.Lock()
 	for _, key := range keys {
-		dispatcher.queueDurableCleanup(key)
+		state := dispatcher.states[key]
+		dispatcher.cleanupQueue = append(dispatcher.cleanupQueue, durableAckCleanup(key, *state.cleanup, state.cleanupVersion))
+		state.cleanupQueued = true
 	}
+	dispatcher.startAckCleanupWorkersLocked()
+	dispatcher.cleanupMu.Unlock()
+	dispatcher.mu.Unlock()
 	// Hold every initially admitted request at the fake server until all four
 	// timestamps exist. This makes slots 0-3 a deterministic initial wave even
 	// when race instrumentation delays individual goroutines.

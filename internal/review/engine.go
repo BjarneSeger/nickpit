@@ -3773,6 +3773,14 @@ func (e *Engine) logWarning(warning string) {
 	e.logProgress(logging.StageWarning, logging.StateWarn, warning)
 }
 
+// logWarnings surfaces several warnings at once, for helpers that hand their
+// warnings back to a caller that records them later.
+func (e *Engine) logWarnings(warnings []string) {
+	for _, warning := range warnings {
+		e.logWarning(warning)
+	}
+}
+
 // logRunWarning surfaces a soft agent failure on the progress stream at the
 // moment the run is marked, rather than leaving it for the result footer's
 // count and the saved session JSON. assemble folds the same text into

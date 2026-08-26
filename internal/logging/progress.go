@@ -196,7 +196,7 @@ const (
 )
 
 // progressStageStyles colours the stage column. Truecolor rather than the
-// xterm-256 cube: seventeen stages need more separation than the cube offers at
+// xterm-256 cube: eighteen stages need more separation than the cube offers at
 // a readable lightness, and the previous 256-colour set had pairs that were
 // practically indistinguishable (Model/Chat, Tool/Verify, ModelCheck/Response).
 // Every entry sits at L* ≥ 64 so it stays readable on a dark background, and no
@@ -219,7 +219,7 @@ var progressStageStyles = map[Stage]string{
 	StageSummarize:  "1;38;2;240;216;140", // pale gold
 	StagePublish:    "1;38;2;252;112;76",  // coral
 	StageResult:     "1;38;2;228;228;20",  // yellow
-	StageWarning:    "1;38;2;252;196;104", // pale orange
+	StageWarning:    "1;38;2;232;160;112", // apricot
 }
 
 func progressStyle(code, text string) string {

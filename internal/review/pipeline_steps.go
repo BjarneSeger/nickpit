@@ -1074,6 +1074,7 @@ func runFinalizeShard(ctx context.Context, sc *stepContext, st *PipelineState, i
 	}
 	warnings := append([]string(nil), finalized.Warnings...)
 	finalized.Warnings = nil
+	sc.Engine.logWarnings(warnings)
 	return finalized, &run, warnings
 }
 
@@ -1120,6 +1121,7 @@ func runVerdictShard(ctx context.Context, sc *stepContext, st *PipelineState, in
 	}
 	warnings := append([]string(nil), verdict.Warnings...)
 	verdict.Warnings = nil
+	sc.Engine.logWarnings(warnings)
 	return verdict, &run, warnings
 }
 
@@ -1140,6 +1142,7 @@ func runSummarizeShard(ctx context.Context, sc *stepContext, in *model.ReviewRes
 	}
 	warnings := append([]string(nil), summarized.Warnings...)
 	summarized.Warnings = nil
+	sc.Engine.logWarnings(warnings)
 	return summarized, &run, warnings
 }
 
