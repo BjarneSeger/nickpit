@@ -17,6 +17,9 @@ import (
 
 type Formatter interface {
 	FormatFindings(result *model.ReviewResult) error
+	// FormatWarnings writes only the run's warnings, for callers that want the
+	// degraded-run detail the findings output reduces to a single count line.
+	FormatWarnings(result *model.ReviewResult) error
 }
 
 const (
@@ -93,6 +96,31 @@ func (f *TerminalFormatter) FormatFindings(result *model.ReviewResult) error {
 	f.writeRule(&b)
 	f.writeFooter(&b, result)
 
+	_, err := io.WriteString(f.w, b.String())
+	return err
+}
+
+// FormatWarnings prints the warning list the findings footer only counts: the
+// same summary line, then every warning in the order the run produced it,
+// tagged with the type the summary groups it under.
+func (f *TerminalFormatter) FormatWarnings(result *model.ReviewResult) error {
+	if len(result.Warnings) == 0 {
+		_, err := io.WriteString(f.w, "No warnings.\n")
+		return err
+	}
+	var b strings.Builder
+	b.WriteString(f.yellow(warningSummary(result.Warnings)))
+	b.WriteString("\n\n")
+	for _, warning := range result.Warnings {
+		text := textsan.StripControl(strings.TrimSpace(warning))
+		if text == "" {
+			continue
+		}
+		b.WriteString(f.yellow("[" + warningType(warning) + "]"))
+		b.WriteString(" ")
+		b.WriteString(text)
+		b.WriteString("\n")
+	}
 	_, err := io.WriteString(f.w, b.String())
 	return err
 }
