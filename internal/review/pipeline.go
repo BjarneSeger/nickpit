@@ -74,11 +74,17 @@ type PipelineState struct {
 	// and failure paths emit static text not worth an LLM call.
 	verdictOverall string
 	summarizeRuns  []model.AgentRun
-	// categorizeRuns and verifyRuns hold one run per executed verify step (one
-	// per reviewer lane in the default workflow), each aggregating every finding
-	// that step classified or verified. Their tokens and tool calls are already
-	// counted in categorizeUsage/verifyUsage/verificationToolCalls, so
-	// aggregateTelemetry lists them without re-adding their telemetry.
+	// Verification runs: one categorize and one verify run per executed verify
+	// step, each aggregating every finding that step handled. The per-reviewer
+	// steps are keyed by vector so aggregateTelemetry can emit them in
+	// groupOrder — reviewer lanes finish in a racy order, and appending to a
+	// flat slice would make equivalent reviews emit differently ordered
+	// agent_runs. The unkeyed slices hold the global verify step's runs. Their
+	// tokens and tool calls are already counted in
+	// categorizeUsage/verifyUsage/verificationToolCalls, so aggregateTelemetry
+	// lists them without re-adding their telemetry.
+	categorizeVectorRuns  map[string][]model.AgentRun
+	verifyVectorRuns      map[string][]model.AgentRun
 	categorizeRuns        []model.AgentRun
 	verifyRuns            []model.AgentRun
 	categorizeUsage       model.TokenUsage
@@ -686,20 +692,36 @@ func (p *Pipeline) assemble(st *PipelineState, req model.ReviewRequest) *model.R
 // addVerificationTelemetry folds one verify step's telemetry into the run state
 // under a single lock: the categorize/verify token buckets, the verify tool-call
 // total, the two step-level AgentRuns, and the step's soft failures. Both verify
-// step shapes (the global step and the per-reviewer lane step) go through it, and
-// reviewer lanes call it concurrently, so this is the only place that writes
-// verification telemetry.
-func (st *PipelineState) addVerificationTelemetry(telemetry verificationTelemetry, warnings []string) {
+// step shapes go through it, and reviewer lanes call it concurrently, so this is
+// the only place that writes verification telemetry. vectorID is the reviewer the
+// step verified, or empty for the global verify step; keying by it keeps the
+// emitted run order independent of which lane finishes first.
+func (st *PipelineState) addVerificationTelemetry(vectorID string, telemetry verificationTelemetry, warnings []string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.categorizeUsage = addTokenUsage(st.categorizeUsage, telemetry.CategorizeUsage)
 	st.verifyUsage = addTokenUsage(st.verifyUsage, telemetry.VerifyUsage)
 	st.verificationToolCalls += telemetry.VerifyToolCalls
-	if telemetry.CategorizeRun != nil {
-		st.categorizeRuns = append(st.categorizeRuns, *telemetry.CategorizeRun)
-	}
-	if telemetry.VerifyRun != nil {
-		st.verifyRuns = append(st.verifyRuns, *telemetry.VerifyRun)
+	if vectorID == "" {
+		if telemetry.CategorizeRun != nil {
+			st.categorizeRuns = append(st.categorizeRuns, *telemetry.CategorizeRun)
+		}
+		if telemetry.VerifyRun != nil {
+			st.verifyRuns = append(st.verifyRuns, *telemetry.VerifyRun)
+		}
+	} else {
+		if telemetry.CategorizeRun != nil {
+			if st.categorizeVectorRuns == nil {
+				st.categorizeVectorRuns = map[string][]model.AgentRun{}
+			}
+			st.categorizeVectorRuns[vectorID] = append(st.categorizeVectorRuns[vectorID], *telemetry.CategorizeRun)
+		}
+		if telemetry.VerifyRun != nil {
+			if st.verifyVectorRuns == nil {
+				st.verifyVectorRuns = map[string][]model.AgentRun{}
+			}
+			st.verifyVectorRuns[vectorID] = append(st.verifyVectorRuns[vectorID], *telemetry.VerifyRun)
+		}
 	}
 	st.warnings.add(warnings...)
 }
@@ -731,7 +753,14 @@ func (st *PipelineState) aggregateTelemetry() ([]model.AgentRun, model.TokenUsag
 	// Verification runs are listed, not accumulated: their tokens and tool
 	// calls already reached the result through st.categorizeUsage,
 	// st.verifyUsage and st.verificationToolCalls in assemble. Adding them here
-	// would double-count every classified and verified finding.
+	// would double-count every classified and verified finding. Per-reviewer
+	// runs are emitted in groupOrder — the order the workflow declares the
+	// lanes, not the order they happened to finish — with each lane's classifier
+	// ahead of its verifier, the order they ran in.
+	for _, id := range st.groupOrder {
+		runs = append(runs, st.categorizeVectorRuns[id]...)
+		runs = append(runs, st.verifyVectorRuns[id]...)
+	}
 	runs = append(runs, st.categorizeRuns...)
 	runs = append(runs, st.verifyRuns...)
 	for _, id := range st.groupOrder {

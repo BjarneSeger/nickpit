@@ -303,7 +303,7 @@ func (e *Engine) categorizeAll(ctx context.Context, reviewCtx *model.ReviewConte
 	// Status stays the implicit ok for the same reason as verifyAll: the
 	// per-finding warnings already carry each failure.
 	run := &model.AgentRun{
-		Name:           "Categorize Findings",
+		Name:           categorizeRunName(opts.ReviewerName),
 		Role:           "categorize",
 		Findings:       len(findings),
 		TokensUsed:     usageSum,
@@ -334,6 +334,16 @@ func fallbackFindingCategorization(f model.Finding) *model.FindingCategorization
 	}
 	model.EnsureCategorizationID(c, f.ID)
 	return c
+}
+
+// categorizeRunName names the step-level AgentRun after its reviewer lane, so a
+// consumer can attribute the run by name instead of by its position in
+// agent_runs. An unnamed classification phase keeps the unscoped name.
+func categorizeRunName(reviewerName string) string {
+	if reviewerName == "" {
+		return "Categorize Findings"
+	}
+	return fmt.Sprintf("Categorize %s", reviewerName)
 }
 
 // categorizeReviewerPrefix labels per-reviewer categorize progress lines.

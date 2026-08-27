@@ -264,6 +264,49 @@ func TestVerifyAllRecordsNoRunWithoutFindings(t *testing.T) {
 	}
 }
 
+// A verifier that repeats a tool request must report it: the step run carries the
+// duplicate count next to the total, so a review where duplicate-call limiting
+// fired cannot serialize as zero duplicates.
+func TestVerifyAllRecordsDuplicateToolCalls(t *testing.T) {
+	llmClient := &scriptedVerifyLLM{
+		responses: []*llm.ReviewResponse{
+			// Attempt 1: fetch main.go, then finish without a verification.
+			{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "inspect_file", Arguments: `{"path":"main.go"}`}}},
+			{RawResponse: "still no verification"},
+			// Attempt 2 repeats the same fetch, which the shared loop state dedupes.
+			{ToolCalls: []llm.ToolCall{{ID: "c2", Name: "inspect_file", Arguments: `{"path":"main.go"}`}}},
+			{Verification: &model.FindingVerification{Verdict: model.VerdictConfirmed, Priority: 1, ConfidenceScore: 0.9, Remarks: "confirmed"}},
+		},
+	}
+	engine := NewEngine(stubSource{}, llmClient, &countingRetrieval{}, config.Profile{Model: "test"})
+
+	findings := []model.Finding{
+		{Title: "x", Body: "x", Priority: intPtr(1), CodeLocation: model.CodeLocation{FilePath: "main.go", LineRange: model.LineRange{Start: 1, End: 1}}},
+	}
+	_, run, _, err := engine.verifyAll(context.Background(), sampleReviewCtx(), findings, VerifyOptions{
+		Limiter:               NewLimiter(1),
+		MaxToolCalls:          4,
+		MaxDuplicateToolCalls: 5,
+		MaxOutputRetries:      2,
+		RepoRoot:              "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil {
+		t.Fatal("verifyAll recorded no AgentRun")
+	}
+	if run.DuplicateToolCalls != 1 {
+		t.Fatalf("run duplicate tool calls = %d, want the one deduped repeat", run.DuplicateToolCalls)
+	}
+	if run.ToolCalls != 2 {
+		t.Fatalf("run tool calls = %d, want both requests counted", run.ToolCalls)
+	}
+	if run.MaxDuplicateToolCalls != 5 {
+		t.Fatalf("run max duplicate tool calls = %d, want the configured 5", run.MaxDuplicateToolCalls)
+	}
+}
+
 func TestVerifyAllAttachesByIndex(t *testing.T) {
 	llmClient := &scriptedVerifyLLM{
 		responses: []*llm.ReviewResponse{

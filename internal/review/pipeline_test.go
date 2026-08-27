@@ -1348,6 +1348,62 @@ func laneTestRequest() model.ReviewRequest {
 	}
 }
 
+// Reviewer lanes finish in a racy order, so verification runs are keyed by
+// vector and emitted in groupOrder — the order the workflow declares the lanes.
+// Two identical reviews must therefore produce the same agent_runs sequence, and
+// each entry must be attributable to its lane by name.
+func TestPipelineEmitsVerificationRunsInLaneOrder(t *testing.T) {
+	declared := []string{"security", "performance", "testing"}
+	st := newPipelineState(&model.ReviewContext{}, declared)
+
+	// Record in the reverse of the declared order, as if the last lane won the race.
+	for i := len(declared) - 1; i >= 0; i-- {
+		id := declared[i]
+		vector, ok := reviewVectorByID(id)
+		if !ok {
+			t.Fatalf("unknown vector %q", id)
+		}
+		st.addVerificationTelemetry(id, verificationTelemetry{
+			CategorizeRun: &model.AgentRun{Name: categorizeRunName(vector.name), Role: "categorize"},
+			VerifyRun:     &model.AgentRun{Name: verifyRunName(vector.name), Role: "verify"},
+		}, nil)
+	}
+
+	runs, _, _, _ := st.aggregateTelemetry()
+	got := make([]string, 0, len(runs))
+	for _, run := range runs {
+		got = append(got, run.Name)
+	}
+	want := []string{
+		"Categorize Security", "Verify Security",
+		"Categorize Performance", "Verify Performance",
+		"Categorize Testing", "Verify Testing",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("verification runs = %v, want lane-declared order %v", got, want)
+	}
+}
+
+// The global verify step has no lane to key on, so its runs keep the unscoped
+// names and trail the per-lane ones.
+func TestPipelineEmitsGlobalVerificationRunsUnscoped(t *testing.T) {
+	st := newPipelineState(&model.ReviewContext{}, []string{"security"})
+	st.addVerificationTelemetry("", verificationTelemetry{
+		CategorizeRun: &model.AgentRun{Name: categorizeRunName(""), Role: "categorize"},
+		VerifyRun:     &model.AgentRun{Name: verifyRunName(""), Role: "verify"},
+	}, nil)
+
+	runs, _, _, _ := st.aggregateTelemetry()
+	got := make([]string, 0, len(runs))
+	for _, run := range runs {
+		got = append(got, run.Name)
+	}
+	want := []string{"Categorize Findings", "Verify Findings"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("verification runs = %v, want %v", got, want)
+	}
+}
+
 func TestPipelineAssembleIncludesInternalVerificationToolCalls(t *testing.T) {
 	st := newPipelineState(&model.ReviewContext{}, nil)
 	st.result = &model.ReviewResult{}

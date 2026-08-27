@@ -645,8 +645,8 @@ Token accounting in the JSON output works as follows:
 - `agent_runs` entries each carry their own `tokens_used` breakdown per `role`:
   - `context` — the context-gathering agent that scouts the change before the reviewer lanes
   - `review` — a reviewer lane's whole session: initial pass, all nudge rounds, and reasoning-extraction
-  - `categorize` — one entry **per verify step** (per reviewer lane in the built-in workflow), aggregating every finding that step classified
-  - `verify` — one entry **per verify step**, aggregating every finding that step verified; its `runtime_seconds` is the step's wall-clock span across the concurrent per-finding agents
+  - `categorize` — one entry **per verify step** (per reviewer lane in the built-in workflow), aggregating every finding that step classified; named after its lane, e.g. `Categorize Security`
+  - `verify` — one entry **per verify step**, aggregating every finding that step verified and named after its lane, e.g. `Verify Security`; its `runtime_seconds` is the step's wall-clock span across the concurrent per-finding agents, and `duplicate_tool_calls` the repeats its verifiers made
   - `dedupe` — a **per-reviewer** de-duplication agent
   - `merge` — the cross-lane merge agent, one entry **per merge cluster**
   - `finalize` — the finalizer that fixes finding wording, priority, and confidence

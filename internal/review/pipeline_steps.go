@@ -396,7 +396,7 @@ func (e *Engine) verifyStepFunc(findingsFrom []string) stepFunc {
 		vr := st.vectorResults()
 		telemetry, warnings, err := sc.Engine.verifyAndFilterVectorFindings(ctx, st.Enriched, vr, sc.Req, st.limiter, "", sc.categorizeAgentContext())
 		st.writeBackVectorResults(vr)
-		st.addVerificationTelemetry(telemetry, warnings)
+		st.addVerificationTelemetry("", telemetry, warnings)
 		if err != nil {
 			sc.Engine.logf(ctx, "Verifier failed before merge: categorize_tokens=%s verify_tokens=%s warnings=%d error=%v", model.HumanTokens(telemetry.CategorizeUsage.TotalTokens), model.HumanTokens(telemetry.VerifyUsage.TotalTokens), len(warnings), err)
 			return err
@@ -424,7 +424,7 @@ func (e *Engine) verifyVectorStepFunc(vectorID string) stepFunc {
 		}
 		results := []agentResult{vr}
 		telemetry, warnings, err := sc.Engine.verifyAndFilterVectorFindings(ctx, st.Enriched, results, sc.Req, st.limiter, vector.name, sc.categorizeAgentContext())
-		st.addVerificationTelemetry(telemetry, warnings)
+		st.addVerificationTelemetry(vectorID, telemetry, warnings)
 		if err != nil {
 			sc.Engine.logf(ctx, "Verifier failed for reviewer: reviewer=%s categorize_tokens=%s verify_tokens=%s warnings=%d error=%v", vector.name, model.HumanTokens(telemetry.CategorizeUsage.TotalTokens), model.HumanTokens(telemetry.VerifyUsage.TotalTokens), len(warnings), err)
 			return err
