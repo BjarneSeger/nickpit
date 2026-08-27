@@ -1357,8 +1357,7 @@ func TestPipelineEmitsVerificationRunsInLaneOrder(t *testing.T) {
 	st := newPipelineState(&model.ReviewContext{}, declared)
 
 	// Record in the reverse of the declared order, as if the last lane won the race.
-	for i := len(declared) - 1; i >= 0; i-- {
-		id := declared[i]
+	for _, id := range slices.Backward(declared) {
 		vector, ok := reviewVectorByID(id)
 		if !ok {
 			t.Fatalf("unknown vector %q", id)
