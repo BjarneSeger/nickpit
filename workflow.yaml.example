@@ -473,8 +473,10 @@ steps:
 # compile_findings, nudge; those subconfigs also accept time_budget.
 # Verify steps accept the categorize subconfig for the blind classifier that
 # runs before evidence verification (no tools, JSON out only). It takes the same
-# keys except time_budget: classification and verification share the verify
-# step's budget.
+# keys, time_budget included: a weight there (1..99) is the classifier's share of
+# the verify step and the verifier takes the rest, so a classifier stalling on an
+# unresponsive endpoint cannot consume the whole step and leave findings
+# unverified. Without one, both phases share the step budget as a single unit.
 # time_budget keys:
 #   max_seconds       max wall-clock seconds for the step/lane/pipeline
 #   speedup_threshold 50..100; 100 disables early urgent retry

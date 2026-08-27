@@ -111,9 +111,9 @@ func scaledStepOverride(override *StepOverride, factor float64, report *TimeBudg
 	copied.MineReasoning = scaledAgentOverride(override.MineReasoning, factor, report)
 	copied.CompileFindings = scaledAgentOverride(override.CompileFindings, factor, report)
 	copied.Nudge = scaledAgentOverride(override.Nudge, factor, report)
-	// Categorize accepts no time_budget of its own — it shares the verify step's —
-	// but it does accept max_reasoning_seconds, so it carries an absolute cap like
-	// any other agent override.
+	// Categorize carries the same absolute caps as any other agent override. Its
+	// time_budget weight — the classifier's share of the verify step — is relative
+	// and so left alone, like every other weight.
 	copied.Categorize = scaledAgentOverride(override.Categorize, factor, report)
 	return &copied
 }

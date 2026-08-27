@@ -417,6 +417,14 @@ func TestValidateRejections(t *testing.T) {
 				Categorize: &AgentOverride{TimeBudget: &TimeBudget{Weight: intPtr(120)}},
 			}},
 		}},
+		// Weight 0 makes the phase optional and unallocated, so the classifier
+		// would inherit the whole verify step deadline instead of a share of it.
+		"categorize weight 0": {Version: 1, Steps: []StepEntry{
+			{Type: StepReviewPrefix + "security"},
+			{Type: StepVerifyPrefix + "security", Config: &StepOverride{
+				Categorize: &AgentOverride{TimeBudget: &TimeBudget{Weight: intPtr(0)}},
+			}},
+		}},
 	}
 	for name, spec := range cases {
 		t.Run(name, func(t *testing.T) {

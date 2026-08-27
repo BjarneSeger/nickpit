@@ -235,11 +235,11 @@ type StepOverride struct {
 	// verify / verify:<vector> steps. Categorize is the blind classifier that
 	// runs before evidence verification: no tools, no patch context, one small
 	// JSON object out — the cheapest agent of a verify step to route to a
-	// smaller model. Its time_budget weight splits the verify step's budget
-	// between the two phases: the classifier gets that share and the verifier
-	// takes the rest, so a stalling classifier can no longer eat the whole step
-	// and leave the verifier nothing. Without one, both phases share the step
-	// budget as a single unit.
+	// smaller model. Its time_budget weight (1..99) splits the verify step's
+	// budget between the two phases: the classifier gets that share and the
+	// verifier takes the rest, so a stalling classifier can no longer eat the
+	// whole step and leave the verifier nothing. Without one, both phases share
+	// the step budget as a single unit.
 	Categorize *AgentOverride `yaml:"categorize"`
 
 	// Dedupe/merge-only prompt trimming, accepted only under config on
@@ -1177,11 +1177,14 @@ func validateStepTimeBudgets(entry StepEntry) error {
 		if err := validateTimeBudget(entry.Config.Categorize.TimeBudget); err != nil {
 			return fmt.Errorf("categorize.time_budget: %w", err)
 		}
-		// The verifier has no weight of its own — it takes whatever the
-		// classifier leaves — so a classifier weight of 100 would starve the
-		// very phase the split exists to protect.
-		if tb := entry.Config.Categorize.TimeBudget; tb != nil && tb.Weight != nil && *tb.Weight >= 100 {
-			return fmt.Errorf("categorize.time_budget weight is %d, must be below 100 so the verifier keeps a share", *tb.Weight)
+		// The verifier has no weight of its own — it takes whatever the classifier
+		// leaves — so the classifier's share must be a real fraction of the step.
+		// 100 leaves the verifier nothing. 0 is worse than it looks: childTimePlans
+		// reads it as "optional" and allocates the phase no duration at all, so the
+		// classifier inherits the whole verify step deadline and a stalled one
+		// starves the verifier exactly as it did before this split existed.
+		if tb := entry.Config.Categorize.TimeBudget; tb != nil && tb.Weight != nil && (*tb.Weight <= 0 || *tb.Weight >= 100) {
+			return fmt.Errorf("categorize.time_budget weight is %d, must be between 1 and 99 so the classifier is bounded and the verifier keeps a share", *tb.Weight)
 		}
 	}
 	return nil
