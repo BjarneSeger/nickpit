@@ -81,6 +81,7 @@ func TestVerifyProgressPrintsVerdictDrop(t *testing.T) {
 		NewLimiter(1),
 		"Security",
 		internalAgentContext{},
+		disabledVerifyPhaseBudgets(context.Background()),
 	)
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("err=%v warnings=%v", err, warnings)

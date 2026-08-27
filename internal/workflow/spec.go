@@ -235,9 +235,11 @@ type StepOverride struct {
 	// verify / verify:<vector> steps. Categorize is the blind classifier that
 	// runs before evidence verification: no tools, no patch context, one small
 	// JSON object out — the cheapest agent of a verify step to route to a
-	// smaller model. time_budget is not accepted here: classification and
-	// verification share the verify step's budget as one unit, so a per-agent
-	// budget would be a silent no-op.
+	// smaller model. Its time_budget weight splits the verify step's budget
+	// between the two phases: the classifier gets that share and the verifier
+	// takes the rest, so a stalling classifier can no longer eat the whole step
+	// and leave the verifier nothing. Without one, both phases share the step
+	// budget as a single unit.
 	Categorize *AgentOverride `yaml:"categorize"`
 
 	// Dedupe/merge-only prompt trimming, accepted only under config on
@@ -365,13 +367,6 @@ var agentOverrideKeys = []string{
 	"max_output_retries", "max_reasoning_seconds",
 	"disable_parallel_tool_calls", "disable_json_response_format",
 }
-
-// categorizeOverrideKeys drops time_budget from the shared agent keys: the
-// classifier runs inside the verify step's own budget, so accepting a separate
-// one there would silently do nothing (see StepOverride.Categorize).
-var categorizeOverrideKeys = slices.DeleteFunc(slices.Clone(agentOverrideKeys), func(key string) bool {
-	return key == "time_budget"
-})
 
 // TimeBudget controls wall-clock budgeting for workflow steps and groups.
 // max_seconds sets a local cap, speedup_threshold controls when urgent retries
@@ -920,7 +915,7 @@ func internalOverrideKeys(stepType string) []string {
 	switch {
 	case strings.HasPrefix(stepType, StepReviewPrefix):
 		return reviewInternalOverrideKeys
-	case stepType == StepVerify || strings.HasPrefix(stepType, StepVerifyPrefix):
+	case isVerifyStep(stepType):
 		return verifyInternalOverrideKeys
 	default:
 		return nil
@@ -928,11 +923,9 @@ func internalOverrideKeys(stepType string) []string {
 }
 
 // internalAgentOverrideKeys returns the keys one internal-agent subconfig
-// accepts.
-func internalAgentOverrideKeys(agentKey string) []string {
-	if agentKey == CategorizeAgentKey {
-		return categorizeOverrideKeys
-	}
+// accepts. Every internal agent takes the same set, the classifier included:
+// its time_budget weight carves the classifier's share out of the verify step.
+func internalAgentOverrideKeys(string) []string {
 	return agentOverrideKeys
 }
 
@@ -1180,7 +1173,24 @@ func validateStepTimeBudgets(entry StepEntry) error {
 			return err
 		}
 	}
+	if isVerifyStep(entry.Type) && entry.Config != nil && entry.Config.Categorize != nil {
+		if err := validateTimeBudget(entry.Config.Categorize.TimeBudget); err != nil {
+			return fmt.Errorf("categorize.time_budget: %w", err)
+		}
+		// The verifier has no weight of its own — it takes whatever the
+		// classifier leaves — so a classifier weight of 100 would starve the
+		// very phase the split exists to protect.
+		if tb := entry.Config.Categorize.TimeBudget; tb != nil && tb.Weight != nil && *tb.Weight >= 100 {
+			return fmt.Errorf("categorize.time_budget weight is %d, must be below 100 so the verifier keeps a share", *tb.Weight)
+		}
+	}
 	return nil
+}
+
+// isVerifyStep reports whether a step type is the global verify step or one of
+// the per-reviewer verify steps.
+func isVerifyStep(stepType string) bool {
+	return stepType == StepVerify || strings.HasPrefix(stepType, StepVerifyPrefix)
 }
 
 func validateGroupTimeBudget(kind string, cfg *StepOverride) error {

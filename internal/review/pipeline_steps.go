@@ -215,6 +215,49 @@ func reviewPhaseBudgetStarters(ctx context.Context, vectorID string, override *w
 	return main, mine, compile, nudge
 }
 
+// verifyPhaseBudgets carries the two starters of a verify step: the blind
+// classifier, then evidence verification.
+type verifyPhaseBudgets struct {
+	categorize timeBudgetStarter
+	verify     timeBudgetStarter
+}
+
+// disabledVerifyPhaseBudgets passes ctx through unchanged for both phases: the
+// verify step keeps one budget shared between them. It is the shape a spec
+// without a categorize time_budget gets, and the one tests use when the split
+// is not what they exercise.
+func disabledVerifyPhaseBudgets(ctx context.Context) verifyPhaseBudgets {
+	return verifyPhaseBudgets{
+		categorize: newTimeBudgetStarter(ctx, nil, childTimePlan{}, false, "", nil),
+		verify:     newTimeBudgetStarter(ctx, nil, childTimePlan{}, false, "", nil),
+	}
+}
+
+// verifyPhaseBudgetStarters splits the verify step's budget between its two
+// phases. The split happens only when the spec gives categorize a time_budget;
+// without one both phases share the step budget as a single unit, which is the
+// historical behavior. Only the classifier carries a weight — the verifier takes
+// the remainder — so a classifier stalling on an unresponsive endpoint can no
+// longer consume the whole step and leave the verifier zero seconds, which is
+// how unverified findings reached a published review.
+func verifyPhaseBudgetStarters(ctx context.Context, scope string, override *workflow.StepOverride, req model.ReviewRequest, logf timeBudgetLogFunc) verifyPhaseBudgets {
+	if req.DisableWorkflowTimeBudget || override == nil {
+		return disabledVerifyPhaseBudgets(ctx)
+	}
+	categorizeTB := agentTimeBudget(override.Categorize)
+	if categorizeTB == nil {
+		return disabledVerifyPhaseBudgets(ctx)
+	}
+	// The verifier's nil budget is what makes it the remainder: resolvedTimeWeights
+	// hands every unset weight an equal share of what the explicit ones leave.
+	budgets := []*workflow.TimeBudget{categorizeTB, nil}
+	plans := childTimePlans(ctx, budgets)
+	return verifyPhaseBudgets{
+		categorize: newTimeBudgetStarter(ctx, categorizeTB, plans[0], true, scope+":categorize", logf),
+		verify:     newTimeBudgetStarter(ctx, nil, plans[1], true, scope+":verify", logf),
+	}
+}
+
 func hasReviewPhaseBudget(override *workflow.StepOverride) bool {
 	if override == nil {
 		return false
@@ -394,7 +437,8 @@ func (e *Engine) verifyStepFunc(findingsFrom []string) stepFunc {
 			return err
 		}
 		vr := st.vectorResults()
-		telemetry, warnings, err := sc.Engine.verifyAndFilterVectorFindings(ctx, st.Enriched, vr, sc.Req, st.limiter, "", sc.categorizeAgentContext())
+		budgets := verifyPhaseBudgetStarters(ctx, "verify", sc.Override, sc.Req, sc.Engine.logf)
+		telemetry, warnings, err := sc.Engine.verifyAndFilterVectorFindings(ctx, st.Enriched, vr, sc.Req, st.limiter, "", sc.categorizeAgentContext(), budgets)
 		st.writeBackVectorResults(vr)
 		st.addVerificationTelemetry("", telemetry, warnings)
 		if err != nil {
@@ -423,7 +467,8 @@ func (e *Engine) verifyVectorStepFunc(vectorID string) stepFunc {
 			return fmt.Errorf("workflow: unknown reviewer vector %q", vectorID)
 		}
 		results := []agentResult{vr}
-		telemetry, warnings, err := sc.Engine.verifyAndFilterVectorFindings(ctx, st.Enriched, results, sc.Req, st.limiter, vector.name, sc.categorizeAgentContext())
+		budgets := verifyPhaseBudgetStarters(ctx, "verify:"+vectorID, sc.Override, sc.Req, sc.Engine.logf)
+		telemetry, warnings, err := sc.Engine.verifyAndFilterVectorFindings(ctx, st.Enriched, results, sc.Req, st.limiter, vector.name, sc.categorizeAgentContext(), budgets)
 		st.addVerificationTelemetry(vectorID, telemetry, warnings)
 		if err != nil {
 			sc.Engine.logf(ctx, "Verifier failed for reviewer: reviewer=%s categorize_tokens=%s verify_tokens=%s warnings=%d error=%v", vector.name, model.HumanTokens(telemetry.CategorizeUsage.TotalTokens), model.HumanTokens(telemetry.VerifyUsage.TotalTokens), len(warnings), err)
