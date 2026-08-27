@@ -105,12 +105,12 @@ steps:
       time_budget:
         max_seconds: 300
   # Each review lane caps at 1800s and its steps split that cap by weight.
-  # verify 45 + dedupe 15 leaves the review step the implicit remainder, 40% = 12m.
-  # Do not write that 40 out as an explicit `weight` on the review step: a weight
+  # verify 25 + dedupe 15 leaves the review step the implicit remainder, 60% = 18m.
+  # Do not write that 60 out as an explicit `weight` on the review step: a weight
   # there also switches on the per-phase split inside the step (main, mine_reasoning,
   # compile_findings, nudge) and the same number is reused as the main phase's share
-  # of the step budget, so `weight: 40` would cut the main review pass to 40% of 12m
-  # instead of leaving the whole 12m for the phases to share.
+  # of the step budget, so `weight: 60` would cut the main review pass to 60% of 18m
+  # instead of leaving the whole 18m for the phases to share.
   - parallel:
       - lane:
           - type: review:codequality
@@ -123,7 +123,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 45
+                weight: 25
               categorize:
                 model: "@small"
           - type: dedupe:codequality
@@ -152,7 +152,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 45
+                weight: 25
               categorize:
                 model: "@small"
           - type: dedupe:security
@@ -181,7 +181,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 45
+                weight: 25
               categorize:
                 model: "@small"
           - type: dedupe:architecture
@@ -210,7 +210,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 45
+                weight: 25
               categorize:
                 model: "@small"
           - type: dedupe:performance
@@ -239,7 +239,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 45
+                weight: 25
               categorize:
                 model: "@small"
           - type: dedupe:testing
@@ -268,7 +268,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 45
+                weight: 25
               categorize:
                 model: "@small"
           - type: dedupe:bestpractices
