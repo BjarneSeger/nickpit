@@ -209,14 +209,18 @@ func buildCategorizeUserPrompt(reviewCtx *model.ReviewContext, finding model.Fin
 	return string(encoded), nil
 }
 
-func (e *Engine) categorizeAll(ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts CategorizeOptions) ([]categorizeResult, model.TokenUsage, []string, error) {
+// categorizeAll returns one AgentRun for the whole call: the step-level
+// aggregate over every finding it classified, not one run per finding. The
+// classifier is toolless, so the run carries tokens and runtime only. A nil run
+// means nothing ran.
+func (e *Engine) categorizeAll(ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts CategorizeOptions) ([]categorizeResult, *model.AgentRun, []string, error) {
 	findings = append([]model.Finding(nil), findings...)
 	if overwrote := model.EnsureFindingIDs(findings); overwrote > 0 {
 		e.logf(ctx, "Categorize generated replacement IDs for invalid finding IDs: count=%d", overwrote)
 	}
 	results := make([]categorizeResult, len(findings))
 	if len(findings) == 0 {
-		return results, model.TokenUsage{}, nil, nil
+		return results, nil, nil, nil
 	}
 
 	var (
@@ -296,7 +300,16 @@ func (e *Engine) categorizeAll(ctx context.Context, reviewCtx *model.ReviewConte
 		}
 	}
 	e.logProgress(logging.StageCategorize, logging.StateDone, fmt.Sprintf("%sfindings=%d prompt_tokens=%s completion_tokens=%s total_tokens=%s warnings=%d runtime=%s", categorizeReviewerPrefix(opts.ReviewerName), len(findings), model.HumanTokens(usageSum.PromptTokens), model.HumanTokens(usageSum.CompletionTokens), model.HumanTokens(usageSum.TotalTokens), len(warnings), model.HumanDuration(time.Since(categorizeStart))))
-	return results, usageSum, warnings, nil
+	// Status stays the implicit ok for the same reason as verifyAll: the
+	// per-finding warnings already carry each failure.
+	run := &model.AgentRun{
+		Name:           "Categorize Findings",
+		Role:           "categorize",
+		Findings:       len(findings),
+		TokensUsed:     usageSum,
+		RuntimeSeconds: model.RuntimeSeconds(time.Since(categorizeStart)),
+	}
+	return results, run, warnings, nil
 }
 
 func effectiveFindingCategories(categorization *model.FindingCategorization) []string {

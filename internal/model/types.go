@@ -182,7 +182,10 @@ type AgentRun struct {
 	DuplicateToolCalls    int        `json:"duplicate_tool_calls"`
 	TokensUsed            TokenUsage `json:"tokens_used"`
 	// RuntimeSeconds is the agent's total wall-clock runtime in seconds
-	// (reviewers: initial pass through nudges and reasoning extraction).
+	// (reviewers: initial pass through nudges and reasoning extraction;
+	// verify/categorize: the whole step's concurrent fan-out over its
+	// findings, since those roles record one run per step rather than one per
+	// finding).
 	RuntimeSeconds float64 `json:"runtime_seconds,omitempty"`
 	// Status is one of AgentRunStatus*. Empty = implicit ok (preserves
 	// backward compatibility with pre-failure-tolerance consumers).

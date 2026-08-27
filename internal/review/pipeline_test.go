@@ -874,8 +874,9 @@ func TestWorkflowReviewerSpecNeedsSourceAndRuns(t *testing.T) {
 		t.Fatalf("findings = %d, want %d", len(result.Findings), len(reviewVectors))
 	}
 	// One micro-merge run: the synthetic vector findings form a single
-	// Possible cluster.
-	expectedAgentRuns := 1 + len(reviewVectors) + 1
+	// Possible cluster. The single global verify step adds one categorize and
+	// one verify run, each aggregating every finding it handled.
+	expectedAgentRuns := 1 + len(reviewVectors) + 2 + 1
 	if len(result.AgentRuns) != expectedAgentRuns {
 		t.Fatalf("agent runs = %d, want %d", len(result.AgentRuns), expectedAgentRuns)
 	}

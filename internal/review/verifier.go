@@ -195,14 +195,19 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 	}
 }
 
-func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts VerifyOptions) ([]verifyResult, model.TokenUsage, int, []string, error) {
+// verifyAll returns one AgentRun for the whole call: the step-level aggregate
+// over every finding it verified, not one run per finding. Its TokensUsed and
+// ToolCalls carry the telemetry the caller folds into the verify phase totals,
+// and RuntimeSeconds is the wall-clock span of the concurrent fan-out. A nil
+// run means nothing ran (no findings, or a failure before the first agent).
+func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts VerifyOptions) ([]verifyResult, *model.AgentRun, []string, error) {
 	findings = append([]model.Finding(nil), findings...)
 	if overwrote := model.EnsureFindingIDs(findings); overwrote > 0 {
 		e.logf(ctx, "Verify generated replacement IDs for invalid finding IDs: count=%d", overwrote)
 	}
 	results := make([]verifyResult, len(findings))
 	if len(findings) == 0 {
-		return results, model.TokenUsage{}, 0, nil, nil
+		return results, nil, nil, nil
 	}
 
 	// Resolve style guides once: the result depends only on reviewCtx, which is
@@ -211,7 +216,7 @@ func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, 
 	// treats it as "provided" even when the repo has no matching guides.
 	sharedStyleGuides, err := e.styleGuidesFor(reviewCtx)
 	if err != nil {
-		return nil, model.TokenUsage{}, 0, nil, err
+		return nil, nil, nil, err
 	}
 	if sharedStyleGuides == nil {
 		sharedStyleGuides = []model.StyleGuide{}
@@ -288,7 +293,21 @@ func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, 
 		}
 	}
 	e.logProgress(logging.StageVerify, logging.StateDone, fmt.Sprintf("%sfindings=%d prompt_tokens=%s completion_tokens=%s total_tokens=%s warnings=%d runtime=%s", verifyReviewerPrefix(opts.ReviewerName), len(findings), model.HumanTokens(usageSum.PromptTokens), model.HumanTokens(usageSum.CompletionTokens), model.HumanTokens(usageSum.TotalTokens), len(warnings), model.HumanDuration(time.Since(verifyStart))))
-	return results, usageSum, toolCalls, warnings, nil
+	// Status stays the implicit ok even when individual findings failed: the
+	// per-finding warnings above already name each failure, and a partial
+	// status here would have appendAgentRunWarnings restate them as one vague
+	// line per lane.
+	run := &model.AgentRun{
+		Name:                  "Verify Findings",
+		Role:                  "verify",
+		Findings:              len(findings),
+		MaxToolCalls:          opts.MaxToolCalls,
+		MaxDuplicateToolCalls: opts.MaxDuplicateToolCalls,
+		ToolCalls:             toolCalls,
+		TokensUsed:            usageSum,
+		RuntimeSeconds:        model.RuntimeSeconds(time.Since(verifyStart)),
+	}
+	return results, run, warnings, nil
 }
 
 func fallbackUnverifiedVerification(f model.Finding) *model.FindingVerification {

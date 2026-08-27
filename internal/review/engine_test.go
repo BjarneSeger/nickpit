@@ -2516,10 +2516,11 @@ func TestEngineRunsContextVectorsMergeWithIndependentToolBudgets(t *testing.T) {
 		t.Fatalf("merged findings = %d, want %d", len(result.Findings), len(reviewVectors))
 	}
 	// The synthetic vector findings form one Possible cluster, so the cluster
-	// merge runs exactly one micro-merge agent.
-	expectedAgentRuns := 1 + len(reviewVectors) + 1
+	// merge runs exactly one micro-merge agent. The verify step contributes its
+	// two step-level runs (categorize and verify).
+	expectedAgentRuns := 1 + len(reviewVectors) + 2 + 1
 	if len(result.AgentRuns) != expectedAgentRuns {
-		t.Fatalf("agent runs = %d, want context + %d reviewers + 1 merge", len(result.AgentRuns), len(reviewVectors))
+		t.Fatalf("agent runs = %d, want context + %d reviewers + categorize + verify + 1 merge", len(result.AgentRuns), len(reviewVectors))
 	}
 	expectedToolCalls := 1 + len(reviewVectors)
 	if result.TotalToolCalls != expectedToolCalls {

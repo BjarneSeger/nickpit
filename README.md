@@ -633,7 +633,7 @@ Reasoning calls are capped with `--max-reasoning-seconds` or `max_reasoning_seco
 
 ### Concurrency and Accounting
 
-Reviews run a context agent first, then six specialist reviewer lanes in parallel: Code Quality, Security, Architecture, Performance, Testing, and Best Practices. Each lane categorizes, verifies, and de-duplicates its reviewer's findings as soon as that reviewer finishes, so only clean findings reach the merge agent. Concurrent LLM agent loops — reviewers, categorizers, verifiers, dedupe, merge, finalize, verdict, summarize — are capped globally with `--concurrency` (default `10`, `0` = unlimited). The classifier is tool-free; tool-call limits apply independently to tool-enabled context, reviewer, verifier, and discussion agents. JSON output includes `total_tool_calls` at the root plus an `agent_runs` summary for workflow agents. Internal per-finding verifier tool calls contribute to `total_tool_calls` even though those verifier calls are represented by phase totals rather than individual `agent_runs` entries.
+Reviews run a context agent first, then six specialist reviewer lanes in parallel: Code Quality, Security, Architecture, Performance, Testing, and Best Practices. Each lane categorizes, verifies, and de-duplicates its reviewer's findings as soon as that reviewer finishes, so only clean findings reach the merge agent. Concurrent LLM agent loops — reviewers, categorizers, verifiers, dedupe, merge, finalize, verdict, summarize — are capped globally with `--concurrency` (default `10`, `0` = unlimited). The classifier is tool-free; tool-call limits apply independently to tool-enabled context, reviewer, verifier, and discussion agents. JSON output includes `total_tool_calls` at the root plus an `agent_runs` summary for workflow agents. Internal per-finding verifier tool calls contribute to `total_tool_calls`; the classifier and verifier appear in `agent_runs` as one entry per verify step rather than one per finding.
 
 Token accounting in the JSON output works as follows:
 - `tokens_used` at root is the grand total for the whole run (including retried calls)
@@ -645,13 +645,15 @@ Token accounting in the JSON output works as follows:
 - `agent_runs` entries each carry their own `tokens_used` breakdown per `role`:
   - `context` — the context-gathering agent that scouts the change before the reviewer lanes
   - `review` — a reviewer lane's whole session: initial pass, all nudge rounds, and reasoning-extraction
+  - `categorize` — one entry **per verify step** (per reviewer lane in the built-in workflow), aggregating every finding that step classified
+  - `verify` — one entry **per verify step**, aggregating every finding that step verified; its `runtime_seconds` is the step's wall-clock span across the concurrent per-finding agents
   - `dedupe` — a **per-reviewer** de-duplication agent
   - `merge` — the cross-lane merge agent, one entry **per merge cluster**
   - `finalize` — the finalizer that fixes finding wording, priority, and confidence
   - `verdict` — the verdict agent that sets the top-level `overall_*` fields
   - `summarize` — the review summarizer
 
-The root `tokens_used` is already the sum of everything, so **do not sum any of the breakdowns**.
+The root `tokens_used` is already the sum of everything, so **do not sum any of the breakdowns**. The `categorize` and `verify` entries are the same spend as `categorize_tokens_used` and `verify_tokens_used`, reported per step — summing those runs on top of the phase totals double-counts them.
 
 
 ## Workflows

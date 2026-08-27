@@ -701,10 +701,10 @@ func flattenVectorFindings(vectorResults []agentResult) ([]model.Finding, []find
 // categorizeAndFilterVectorFindings performs the private classification half of
 // verification. The model only emits descriptive labels; Go applies the drop
 // policy without exposing its routing consequences to either model.
-func (e *Engine) categorizeAndFilterVectorFindings(ctx context.Context, reviewCtx *model.ReviewContext, vectorResults []agentResult, req model.ReviewRequest, limiter *Limiter, reviewerName string) (model.TokenUsage, []string, error) {
+func (e *Engine) categorizeAndFilterVectorFindings(ctx context.Context, reviewCtx *model.ReviewContext, vectorResults []agentResult, req model.ReviewRequest, limiter *Limiter, reviewerName string) (*model.AgentRun, []string, error) {
 	findings, refs := flattenVectorFindings(vectorResults)
 	if len(findings) == 0 {
-		return model.TokenUsage{}, nil, nil
+		return nil, nil, nil
 	}
 	if overwrote := model.EnsureFindingIDs(findings); overwrote > 0 {
 		e.logf(ctx, "Review generated replacement IDs before categorization: count=%d", overwrote)
@@ -712,12 +712,12 @@ func (e *Engine) categorizeAndFilterVectorFindings(ctx context.Context, reviewCt
 	opts := categorizeOptionsFromReviewRequest(req)
 	opts.Limiter = limiter
 	opts.ReviewerName = reviewerName
-	categorizeResults, usage, warnings, err := e.categorizeAll(ctx, reviewCtx, findings, opts)
+	categorizeResults, run, warnings, err := e.categorizeAll(ctx, reviewCtx, findings, opts)
 	if err != nil {
-		return usage, warnings, err
+		return run, warnings, err
 	}
 	if len(categorizeResults) != len(refs) {
-		return usage, warnings, fmt.Errorf("review: categorizer returned %d results for %d findings", len(categorizeResults), len(refs))
+		return run, warnings, fmt.Errorf("review: categorizer returned %d results for %d findings", len(categorizeResults), len(refs))
 	}
 	type dropCounts struct {
 		confirmation int
@@ -793,7 +793,7 @@ func (e *Engine) categorizeAndFilterVectorFindings(ctx context.Context, reviewCt
 			)
 		}
 	}
-	return usage, warnings, nil
+	return run, warnings, nil
 }
 
 func shouldDropCategories(categories []string, policy string) (bool, string) {
@@ -818,6 +818,13 @@ type verificationTelemetry struct {
 	CategorizeUsage model.TokenUsage
 	VerifyUsage     model.TokenUsage
 	VerifyToolCalls int
+	// CategorizeRun and VerifyRun are step-level aggregates: one run each over
+	// every finding the step classified and verified, not one per finding. Both
+	// are nil when that half had nothing to do. The usage fields above stay the
+	// authoritative phase totals and are filled from these runs, so the two can
+	// never disagree.
+	CategorizeRun *model.AgentRun
+	VerifyRun     *model.AgentRun
 }
 
 // verifyAndFilterVectorFindings is the atomic workflow operation: deterministic
@@ -833,8 +840,11 @@ func (e *Engine) verifyAndFilterVectorFindings(ctx context.Context, reviewCtx *m
 		categorizeEngine, categorizeReq = categorize.Engine, categorize.Req
 	}
 	scopeWarnings := e.prepareFindingsForVerification(ctx, reviewCtx, vectorResults, req)
-	categorizeUsage, categorizeWarnings, err := categorizeEngine.categorizeAndFilterVectorFindings(ctx, reviewCtx, vectorResults, categorizeReq, limiter, reviewerName)
-	telemetry.CategorizeUsage = categorizeUsage
+	categorizeRun, categorizeWarnings, err := categorizeEngine.categorizeAndFilterVectorFindings(ctx, reviewCtx, vectorResults, categorizeReq, limiter, reviewerName)
+	telemetry.CategorizeRun = categorizeRun
+	if categorizeRun != nil {
+		telemetry.CategorizeUsage = categorizeRun.TokensUsed
+	}
 	warnings := append(scopeWarnings, categorizeWarnings...)
 	if err != nil {
 		return telemetry, warnings, err
@@ -850,9 +860,12 @@ func (e *Engine) verifyAndFilterVectorFindings(ctx context.Context, reviewCtx *m
 	opts := verifyOptionsFromReviewRequest(req)
 	opts.Limiter = limiter
 	opts.ReviewerName = reviewerName
-	verifyResults, usage, verifyCalls, verifyWarnings, err := e.verifyAll(ctx, reviewCtx, findings, opts)
-	telemetry.VerifyUsage = usage
-	telemetry.VerifyToolCalls = verifyCalls
+	verifyResults, verifyRun, verifyWarnings, err := e.verifyAll(ctx, reviewCtx, findings, opts)
+	telemetry.VerifyRun = verifyRun
+	if verifyRun != nil {
+		telemetry.VerifyUsage = verifyRun.TokensUsed
+		telemetry.VerifyToolCalls = verifyRun.ToolCalls
+	}
 	warnings = append(warnings, verifyWarnings...)
 	if err != nil {
 		return telemetry, warnings, err

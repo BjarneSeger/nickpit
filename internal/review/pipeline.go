@@ -72,8 +72,15 @@ type PipelineState struct {
 	// verdict's own clears it (see setResultLocked), so it never outlives the
 	// result it describes. Empty unless the agent actually ran: the deterministic
 	// and failure paths emit static text not worth an LLM call.
-	verdictOverall        string
-	summarizeRuns         []model.AgentRun
+	verdictOverall string
+	summarizeRuns  []model.AgentRun
+	// categorizeRuns and verifyRuns hold one run per executed verify step (one
+	// per reviewer lane in the default workflow), each aggregating every finding
+	// that step classified or verified. Their tokens and tool calls are already
+	// counted in categorizeUsage/verifyUsage/verificationToolCalls, so
+	// aggregateTelemetry lists them without re-adding their telemetry.
+	categorizeRuns        []model.AgentRun
+	verifyRuns            []model.AgentRun
 	categorizeUsage       model.TokenUsage
 	verificationToolCalls int
 	verifyUsage           model.TokenUsage
@@ -658,9 +665,10 @@ func (p *Pipeline) assemble(st *PipelineState, req model.ReviewRequest) *model.R
 	allRuns, usage, toolCalls, reasoning := st.aggregateTelemetry()
 	res.AgentRuns = allRuns
 	res.Warnings = appendAgentRunWarnings(st.warnings.list(), allRuns, st.contextErr)
-	// Classifier and verifier calls are tracked as phase telemetry rather than
-	// AgentRuns, but they still count toward the review's total model spend and
-	// tool-call total.
+	// The classifier and verifier each contribute one AgentRun per verify step
+	// (runtime and per-step totals), but their spend is carried by the phase
+	// buckets below rather than by those runs, and it still counts toward the
+	// review's total model spend and tool-call total.
 	res.TokensUsed = addTokenUsage(addTokenUsage(usage, st.categorizeUsage), st.verifyUsage)
 	res.CategorizeTokensUsed = st.categorizeUsage
 	res.VerifyTokensUsed = st.verifyUsage
@@ -673,6 +681,27 @@ func (p *Pipeline) assemble(st *PipelineState, req model.ReviewRequest) *model.R
 		res.StripSuggestions()
 	}
 	return res
+}
+
+// addVerificationTelemetry folds one verify step's telemetry into the run state
+// under a single lock: the categorize/verify token buckets, the verify tool-call
+// total, the two step-level AgentRuns, and the step's soft failures. Both verify
+// step shapes (the global step and the per-reviewer lane step) go through it, and
+// reviewer lanes call it concurrently, so this is the only place that writes
+// verification telemetry.
+func (st *PipelineState) addVerificationTelemetry(telemetry verificationTelemetry, warnings []string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.categorizeUsage = addTokenUsage(st.categorizeUsage, telemetry.CategorizeUsage)
+	st.verifyUsage = addTokenUsage(st.verifyUsage, telemetry.VerifyUsage)
+	st.verificationToolCalls += telemetry.VerifyToolCalls
+	if telemetry.CategorizeRun != nil {
+		st.categorizeRuns = append(st.categorizeRuns, *telemetry.CategorizeRun)
+	}
+	if telemetry.VerifyRun != nil {
+		st.verifyRuns = append(st.verifyRuns, *telemetry.VerifyRun)
+	}
+	st.warnings.add(warnings...)
 }
 
 func (st *PipelineState) aggregateTelemetry() ([]model.AgentRun, model.TokenUsage, int, string) {
@@ -699,6 +728,12 @@ func (st *PipelineState) aggregateTelemetry() ([]model.AgentRun, model.TokenUsag
 			reasoning = g.result.reasoningEffort
 		}
 	}
+	// Verification runs are listed, not accumulated: their tokens and tool
+	// calls already reached the result through st.categorizeUsage,
+	// st.verifyUsage and st.verificationToolCalls in assemble. Adding them here
+	// would double-count every classified and verified finding.
+	runs = append(runs, st.categorizeRuns...)
+	runs = append(runs, st.verifyRuns...)
 	for _, id := range st.groupOrder {
 		for _, run := range st.dedupeVectorRuns[id] {
 			runs = append(runs, run)
