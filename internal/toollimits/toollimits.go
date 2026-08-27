@@ -50,6 +50,10 @@ const (
 	MaxGitShowCommits     = 50
 
 	// DefaultMaxToolCalls is 0, meaning unlimited calls per agent.
-	DefaultMaxToolCalls          = 0
-	DefaultMaxDuplicateToolCalls = 5
+	DefaultMaxToolCalls = 0
+	// DefaultMaxDuplicateToolCalls cuts an agent over to its final no-tools call
+	// after this many repeated requests. Kept low because a repeat buys nothing
+	// — the loop answers it with already_requested — while still costing a whole
+	// turn of generation, which is what a review's wall-clock time is made of.
+	DefaultMaxDuplicateToolCalls = 2
 )
