@@ -50,15 +50,15 @@ func TestDefaultSpecMatchesConstants(t *testing.T) {
 	all := ScopeAll
 	finding := ScopeFinding
 	reviewer := ScopeReviewer
-	max180 := 180
+	max300 := 300
 	max1200 := 1200
-	max1500 := 1500
+	max1800 := 1800
 	weight10 := 10
 	weight15 := 15
 	weight20 := 20
 	weight30 := 30
 	weight40 := 40
-	weight55 := 55
+	weight45 := 45
 	reviewConfig := func() *StepOverride {
 		return &StepOverride{
 			MineReasoning:   &AgentOverride{Model: &small},
@@ -74,12 +74,12 @@ func TestDefaultSpecMatchesConstants(t *testing.T) {
 	for i, id := range ReviewVectorIDs {
 		parallel[i] = StepEntry{Name: laneNames[i], Lane: []StepEntry{
 			{Type: StepReviewPrefix + id, Config: reviewConfig()},
-			{Type: StepVerifyPrefix + id, Config: &StepOverride{Scope: &finding, TimeBudget: &TimeBudget{Weight: &weight55}, Categorize: &AgentOverride{Model: &small}}},
+			{Type: StepVerifyPrefix + id, Config: &StepOverride{Scope: &finding, TimeBudget: &TimeBudget{Weight: &weight45}, Categorize: &AgentOverride{Model: &small}}},
 			{Type: StepDedupePrefix + id, Config: &StepOverride{Scope: &reviewer, TimeBudget: &TimeBudget{Weight: &weight15}, Context: fullContext()}},
-		}, Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max1500}}}
+		}, Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max1800}}}
 	}
 	want := Spec{Version: SpecVersion, Name: "Standard review", Steps: []StepEntry{
-		{Type: StepCollectContext, Name: "Context", Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max180}}},
+		{Type: StepCollectContext, Name: "Context", Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max300}}},
 		{Name: "Review", Parallel: parallel},
 		{Name: "Finalize", Pipeline: []StepEntry{
 			{Type: StepMerge, Config: &StepOverride{Scope: &cluster, TimeBudget: &TimeBudget{Weight: &weight30}, Context: fullContext()}},

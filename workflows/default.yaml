@@ -7,7 +7,14 @@ steps:
     name: Context
     config:
       time_budget:
-        max_seconds: 180
+        max_seconds: 300
+  # Each review lane caps at 1800s and its steps split that cap by weight.
+  # verify 45 + dedupe 15 leaves the review step the implicit remainder, 40% = 12m.
+  # Do not write that 40 out as an explicit `weight` on the review step: a weight
+  # there also switches on the per-phase split inside the step (main, mine_reasoning,
+  # compile_findings, nudge) and the same number is reused as the main phase's share
+  # of the step budget, so `weight: 40` would cut the main review pass to 40% of 12m
+  # instead of leaving the whole 12m for the phases to share.
   - parallel:
       - lane:
           - type: review:codequality
@@ -20,7 +27,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 55
+                weight: 45
               categorize:
                 model: "@small"
           - type: dedupe:codequality
@@ -37,7 +44,7 @@ steps:
         name: Code quality
         config:
           time_budget:
-            max_seconds: 1500
+            max_seconds: 1800
       - lane:
           - type: review:security
             config:
@@ -49,7 +56,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 55
+                weight: 45
               categorize:
                 model: "@small"
           - type: dedupe:security
@@ -66,7 +73,7 @@ steps:
         name: Security
         config:
           time_budget:
-            max_seconds: 1500
+            max_seconds: 1800
       - lane:
           - type: review:architecture
             config:
@@ -78,7 +85,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 55
+                weight: 45
               categorize:
                 model: "@small"
           - type: dedupe:architecture
@@ -95,7 +102,7 @@ steps:
         name: Architecture
         config:
           time_budget:
-            max_seconds: 1500
+            max_seconds: 1800
       - lane:
           - type: review:performance
             config:
@@ -107,7 +114,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 55
+                weight: 45
               categorize:
                 model: "@small"
           - type: dedupe:performance
@@ -124,7 +131,7 @@ steps:
         name: Performance
         config:
           time_budget:
-            max_seconds: 1500
+            max_seconds: 1800
       - lane:
           - type: review:testing
             config:
@@ -136,7 +143,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 55
+                weight: 45
               categorize:
                 model: "@small"
           - type: dedupe:testing
@@ -153,7 +160,7 @@ steps:
         name: Testing
         config:
           time_budget:
-            max_seconds: 1500
+            max_seconds: 1800
       - lane:
           - type: review:bestpractices
             config:
@@ -165,7 +172,7 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 55
+                weight: 45
               categorize:
                 model: "@small"
           - type: dedupe:bestpractices
@@ -182,7 +189,7 @@ steps:
         name: Best practices
         config:
           time_budget:
-            max_seconds: 1500
+            max_seconds: 1800
     name: Review
   - pipeline:
       - type: merge
