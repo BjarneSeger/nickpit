@@ -347,7 +347,7 @@ steps:
 #       reasoning_effort: low
 #       max_tool_calls: 40
 #       time_budget:
-#         max_seconds: 180
+#         max_seconds: 300
 #         speedup_threshold: 80
 #   - parallel:
 #       - lane:
