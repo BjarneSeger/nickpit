@@ -201,8 +201,8 @@ func TestWithScaledTimeBudgetsKeepsTheDefaultSpecValid(t *testing.T) {
 	if found == 0 {
 		t.Fatal("no absolute budgets found in the default spec; the test no longer covers anything")
 	}
-	if got := *scaled.Steps[0].Config.TimeBudget.MaxSeconds; got != 540 {
-		t.Fatalf("default context budget = %d, want 3x180", got)
+	if got := *scaled.Steps[0].Config.TimeBudget.MaxSeconds; got != 900 {
+		t.Fatalf("default context budget = %d, want 3x300", got)
 	}
 	if report.Caps < found || report.Clamped != 0 {
 		t.Fatalf("report = %+v, want at least %d caps and none clamped", report, found)
