@@ -56,10 +56,24 @@ type verifyResult struct {
 	Verification *model.FindingVerification
 }
 
-func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyResult, model.TokenUsage, int, error) {
+// agentToolCounts is one agent loop's tool accounting: every call it made and
+// the subset the loop rejected as a repeat. Both travel together because a
+// duplicate count without its total says nothing about how noisy the agent was.
+type agentToolCounts struct {
+	toolCalls          int
+	duplicateToolCalls int
+}
+
+func (c agentToolCounts) add(other agentToolCounts) agentToolCounts {
+	c.toolCalls += other.toolCalls
+	c.duplicateToolCalls += other.duplicateToolCalls
+	return c
+}
+
+func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyResult, model.TokenUsage, agentToolCounts, error) {
 	usage := model.TokenUsage{}
 	if req.ReviewCtx == nil {
-		return nil, usage, 0, fmt.Errorf("verify: nil review context")
+		return nil, usage, agentToolCounts{}, fmt.Errorf("verify: nil review context")
 	}
 	if model.EnsureFindingID(&req.Finding) {
 		e.logf(ctx, "Verify generated replacement ID for invalid finding ID: title=%q", req.Finding.Title)
@@ -67,7 +81,7 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 
 	systemTemplate, err := e.loadPrompt("agent_verify_system_prompt.tmpl")
 	if err != nil {
-		return nil, usage, 0, err
+		return nil, usage, agentToolCounts{}, err
 	}
 	systemSnippet := llm.VerifyExamplePromptSnippet()
 	agentKind := "verify"
@@ -76,22 +90,22 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 		parallelToolCallGuidance: !req.DisableParallelToolCalls,
 	})
 	if err != nil {
-		return nil, usage, 0, err
+		return nil, usage, agentToolCounts{}, err
 	}
 	commonSnippets, err := agentCommonSystemPromptSnippets("verify", systemSnippet, req.DisableSuggestions)
 	if err != nil {
-		return nil, usage, 0, err
+		return nil, usage, agentToolCounts{}, err
 	}
 	styleGuides := req.StyleGuides
 	if styleGuides == nil {
 		styleGuides, err = e.styleGuidesFor(req.ReviewCtx)
 		if err != nil {
-			return nil, usage, 0, err
+			return nil, usage, agentToolCounts{}, err
 		}
 	}
 	styleGuideToolchainSnippet, err := e.renderStyleGuideToolchainSnippet(agentKind, styleGuides, len(req.ReviewCtx.ToolchainVersions) > 0)
 	if err != nil {
-		return nil, usage, 0, err
+		return nil, usage, agentToolCounts{}, err
 	}
 	systemPrompt, err := llm.RenderPrompt(systemTemplate, struct {
 		OutputSchemaSnippet        string
@@ -111,12 +125,12 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 		StyleGuideToolchainSnippet: styleGuideToolchainSnippet,
 	})
 	if err != nil {
-		return nil, usage, 0, fmt.Errorf("verify: rendering system prompt: %w", err)
+		return nil, usage, agentToolCounts{}, fmt.Errorf("verify: rendering system prompt: %w", err)
 	}
 
 	userPrompt, err := e.buildFindingAgentUserPrompt("verify", req.ReviewCtx, req.Finding, req.DisableSuggestions, req.DiffFormat)
 	if err != nil {
-		return nil, usage, 0, err
+		return nil, usage, agentToolCounts{}, err
 	}
 
 	var schema []byte
@@ -137,6 +151,9 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 	// tool-dedup and retry budgets carry over instead of resetting per attempt
 	// (a fresh state would let every retry re-fetch the same files).
 	state := newAgentLoopState()
+	counts := func() agentToolCounts {
+		return agentToolCounts{toolCalls: state.toolCalls, duplicateToolCalls: state.duplicateToolCalls}
+	}
 	for attempt := 0; ; attempt++ {
 		loopResult, err := e.runAgentLoop(ctx, agentLoopRequest{
 			AgentName:                         "Verify Findings",
@@ -177,16 +194,16 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 			// returns its partial result on every error path) for telemetry
 			// parity with the finalizer/summarizer failure handling.
 			usage = addTokenUsage(usage, loopResult.tokensUsed)
-			return nil, usage, state.toolCalls, err
+			return nil, usage, counts(), err
 		}
 		usage = addTokenUsage(usage, loopResult.tokensUsed)
 		resp := loopResult.resp
 		if resp != nil && resp.Verification != nil {
 			model.EnsureVerificationID(resp.Verification, req.Finding.ID)
-			return &verifyResult{Verification: resp.Verification}, usage, state.toolCalls, nil
+			return &verifyResult{Verification: resp.Verification}, usage, counts(), nil
 		}
 		if !outputRetriesRemaining(attempt, req.MaxOutputRetries) {
-			return nil, usage, state.toolCalls, fmt.Errorf("verify: missing verification in response")
+			return nil, usage, counts(), fmt.Errorf("verify: missing verification in response")
 		}
 		e.logf(ctx, "Verify: missing verification, retrying: attempt=%d", attempt+1)
 		if len(loopResult.messages) > 0 {
@@ -195,14 +212,19 @@ func (e *Engine) verifyFinding(ctx context.Context, req VerifyRequest) (*verifyR
 	}
 }
 
-func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts VerifyOptions) ([]verifyResult, model.TokenUsage, int, []string, error) {
+// verifyAll returns one AgentRun for the whole call: the step-level aggregate
+// over every finding it verified, not one run per finding. Its TokensUsed and
+// ToolCalls carry the telemetry the caller folds into the verify phase totals,
+// and RuntimeSeconds is the wall-clock span of the concurrent fan-out. A nil
+// run means nothing ran (no findings, or a failure before the first agent).
+func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts VerifyOptions) ([]verifyResult, *model.AgentRun, []string, error) {
 	findings = append([]model.Finding(nil), findings...)
 	if overwrote := model.EnsureFindingIDs(findings); overwrote > 0 {
 		e.logf(ctx, "Verify generated replacement IDs for invalid finding IDs: count=%d", overwrote)
 	}
 	results := make([]verifyResult, len(findings))
 	if len(findings) == 0 {
-		return results, model.TokenUsage{}, 0, nil, nil
+		return results, nil, nil, nil
 	}
 
 	// Resolve style guides once: the result depends only on reviewCtx, which is
@@ -211,18 +233,18 @@ func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, 
 	// treats it as "provided" even when the repo has no matching guides.
 	sharedStyleGuides, err := e.styleGuidesFor(reviewCtx)
 	if err != nil {
-		return nil, model.TokenUsage{}, 0, nil, err
+		return nil, nil, nil, err
 	}
 	if sharedStyleGuides == nil {
 		sharedStyleGuides = []model.StyleGuide{}
 	}
 
 	var (
-		mu        sync.Mutex
-		usageSum  model.TokenUsage
-		toolCalls int
-		warnings  []string
-		wg        sync.WaitGroup
+		mu       sync.Mutex
+		usageSum model.TokenUsage
+		counts   agentToolCounts
+		warnings []string
+		wg       sync.WaitGroup
 	)
 	verifyStart := time.Now()
 	e.logProgress(logging.StageVerify, logging.StateStart, fmt.Sprintf("%sfindings=%d concurrency=%s", verifyReviewerPrefix(opts.ReviewerName), len(findings), verifyConcurrencyLabel(opts.Limiter)))
@@ -262,12 +284,12 @@ func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, 
 				DisableSuggestions:        opts.DisableSuggestions,
 				DiffFormat:                opts.DiffFormat,
 			}
-			result, usage, calls, err := e.verifyFinding(ctx, req)
+			result, usage, findingCounts, err := e.verifyFinding(ctx, req)
 			mu.Lock()
 			usageSum.PromptTokens += usage.PromptTokens
 			usageSum.CompletionTokens += usage.CompletionTokens
 			usageSum.TotalTokens += usage.TotalTokens
-			toolCalls += calls
+			counts = counts.add(findingCounts)
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("Verify failed for finding #%d %q: %v", idx+1, f.Title, err))
 			}
@@ -288,7 +310,22 @@ func (e *Engine) verifyAll(ctx context.Context, reviewCtx *model.ReviewContext, 
 		}
 	}
 	e.logProgress(logging.StageVerify, logging.StateDone, fmt.Sprintf("%sfindings=%d prompt_tokens=%s completion_tokens=%s total_tokens=%s warnings=%d runtime=%s", verifyReviewerPrefix(opts.ReviewerName), len(findings), model.HumanTokens(usageSum.PromptTokens), model.HumanTokens(usageSum.CompletionTokens), model.HumanTokens(usageSum.TotalTokens), len(warnings), model.HumanDuration(time.Since(verifyStart))))
-	return results, usageSum, toolCalls, warnings, nil
+	// Status stays the implicit ok even when individual findings failed: the
+	// per-finding warnings above already name each failure, and a partial
+	// status here would have appendAgentRunWarnings restate them as one vague
+	// line per lane.
+	run := &model.AgentRun{
+		Name:                  verifyRunName(opts.ReviewerName),
+		Role:                  "verify",
+		Findings:              len(findings),
+		MaxToolCalls:          opts.MaxToolCalls,
+		MaxDuplicateToolCalls: opts.MaxDuplicateToolCalls,
+		ToolCalls:             counts.toolCalls,
+		DuplicateToolCalls:    counts.duplicateToolCalls,
+		TokensUsed:            usageSum,
+		RuntimeSeconds:        model.RuntimeSeconds(time.Since(verifyStart)),
+	}
+	return results, run, warnings, nil
 }
 
 func fallbackUnverifiedVerification(f model.Finding) *model.FindingVerification {
@@ -301,6 +338,16 @@ func fallbackUnverifiedVerification(f model.Finding) *model.FindingVerification 
 	}
 	model.EnsureVerificationID(v, f.ID)
 	return v
+}
+
+// verifyRunName names the step-level AgentRun after its reviewer lane, so a
+// consumer can attribute the run's tokens and runtime by name instead of by its
+// position in agent_runs. The global verify step keeps the unscoped name.
+func verifyRunName(reviewerName string) string {
+	if reviewerName == "" {
+		return "Verify Findings"
+	}
+	return fmt.Sprintf("Verify %s", reviewerName)
 }
 
 // verifyReviewerPrefix labels per-reviewer verify progress lines; the global

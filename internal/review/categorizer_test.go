@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dgrieser/nickpit/internal/config"
 	"github.com/dgrieser/nickpit/internal/llm"
@@ -20,9 +21,15 @@ type scriptedCategorizeLLM struct {
 	requests  []*llm.ReviewRequest
 	responses []*llm.ReviewResponse
 	err       error
+	// delay makes each agent call take measurable wall-clock time, so a test
+	// can assert on a recorded runtime instead of a stub's sub-millisecond zero.
+	delay time.Duration
 }
 
 func (s *scriptedCategorizeLLM) Review(_ context.Context, req *llm.ReviewRequest) (*llm.ReviewResponse, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -74,12 +81,51 @@ func testCategorize(e *Engine, ctx context.Context, req CategorizeRequest) (*mod
 }
 
 func testCategorizeAll(e *Engine, ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts CategorizeOptions) ([]*model.FindingCategorization, model.TokenUsage, []string, error) {
-	results, usage, warnings, err := e.categorizeAll(ctx, reviewCtx, findings, opts)
+	results, run, warnings, err := e.categorizeAll(ctx, reviewCtx, findings, opts)
 	categorizations := make([]*model.FindingCategorization, len(results))
 	for i := range results {
 		categorizations[i] = results[i].Categorization
 	}
+	usage := model.TokenUsage{}
+	if run != nil {
+		usage = run.TokensUsed
+	}
 	return categorizations, usage, warnings, err
+}
+
+// The classifier records one step-level AgentRun for the whole fan-out, with the
+// step's wall-clock span and its token total. It is toolless, so the run carries
+// no tool calls.
+func TestCategorizeAllRecordsStepAgentRun(t *testing.T) {
+	llmClient := &scriptedCategorizeLLM{delay: 20 * time.Millisecond}
+	engine := NewEngine(stubSource{}, llmClient, stubRetrieval{}, config.Profile{Model: "test"})
+
+	findings := []model.Finding{
+		sampleFinding("first", "a.go", 1),
+		sampleFinding("second", "b.go", 2),
+	}
+	_, run, _, err := engine.categorizeAll(context.Background(), sampleReviewCtx(), findings, CategorizeOptions{Limiter: NewLimiter(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil {
+		t.Fatal("categorizeAll recorded no AgentRun")
+	}
+	if run.Name != "Categorize Findings" || run.Role != "categorize" {
+		t.Fatalf("run identity = %q/%q, want Categorize Findings/categorize", run.Name, run.Role)
+	}
+	if run.Findings != len(findings) {
+		t.Fatalf("run findings = %d, want %d", run.Findings, len(findings))
+	}
+	if run.TokensUsed.TotalTokens != len(findings)*2 {
+		t.Fatalf("run tokens = %d, want %d", run.TokensUsed.TotalTokens, len(findings)*2)
+	}
+	if run.ToolCalls != 0 {
+		t.Fatalf("run tool calls = %d, want none from the toolless classifier", run.ToolCalls)
+	}
+	if run.RuntimeSeconds <= 0 {
+		t.Fatalf("run runtime = %v, want the fan-out span", run.RuntimeSeconds)
+	}
 }
 
 func TestCategorizeIsBlindAndToolFree(t *testing.T) {

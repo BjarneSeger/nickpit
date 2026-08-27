@@ -874,8 +874,9 @@ func TestWorkflowReviewerSpecNeedsSourceAndRuns(t *testing.T) {
 		t.Fatalf("findings = %d, want %d", len(result.Findings), len(reviewVectors))
 	}
 	// One micro-merge run: the synthetic vector findings form a single
-	// Possible cluster.
-	expectedAgentRuns := 1 + len(reviewVectors) + 1
+	// Possible cluster. The single global verify step adds one categorize and
+	// one verify run, each aggregating every finding it handled.
+	expectedAgentRuns := 1 + len(reviewVectors) + 2 + 1
 	if len(result.AgentRuns) != expectedAgentRuns {
 		t.Fatalf("agent runs = %d, want %d", len(result.AgentRuns), expectedAgentRuns)
 	}
@@ -1344,6 +1345,61 @@ func laneTestRequest() model.ReviewRequest {
 		RepoRoot:         ".",
 		MaxContextTokens: 1000,
 		MaxToolCalls:     1,
+	}
+}
+
+// Reviewer lanes finish in a racy order, so verification runs are keyed by
+// vector and emitted in groupOrder — the order the workflow declares the lanes.
+// Two identical reviews must therefore produce the same agent_runs sequence, and
+// each entry must be attributable to its lane by name.
+func TestPipelineEmitsVerificationRunsInLaneOrder(t *testing.T) {
+	declared := []string{"security", "performance", "testing"}
+	st := newPipelineState(&model.ReviewContext{}, declared)
+
+	// Record in the reverse of the declared order, as if the last lane won the race.
+	for _, id := range slices.Backward(declared) {
+		vector, ok := reviewVectorByID(id)
+		if !ok {
+			t.Fatalf("unknown vector %q", id)
+		}
+		st.addVerificationTelemetry(id, verificationTelemetry{
+			CategorizeRun: &model.AgentRun{Name: categorizeRunName(vector.name), Role: "categorize"},
+			VerifyRun:     &model.AgentRun{Name: verifyRunName(vector.name), Role: "verify"},
+		}, nil)
+	}
+
+	runs, _, _, _ := st.aggregateTelemetry()
+	got := make([]string, 0, len(runs))
+	for _, run := range runs {
+		got = append(got, run.Name)
+	}
+	want := []string{
+		"Categorize Security", "Verify Security",
+		"Categorize Performance", "Verify Performance",
+		"Categorize Testing", "Verify Testing",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("verification runs = %v, want lane-declared order %v", got, want)
+	}
+}
+
+// The global verify step has no lane to key on, so its runs keep the unscoped
+// names and trail the per-lane ones.
+func TestPipelineEmitsGlobalVerificationRunsUnscoped(t *testing.T) {
+	st := newPipelineState(&model.ReviewContext{}, []string{"security"})
+	st.addVerificationTelemetry("", verificationTelemetry{
+		CategorizeRun: &model.AgentRun{Name: categorizeRunName(""), Role: "categorize"},
+		VerifyRun:     &model.AgentRun{Name: verifyRunName(""), Role: "verify"},
+	}, nil)
+
+	runs, _, _, _ := st.aggregateTelemetry()
+	got := make([]string, 0, len(runs))
+	for _, run := range runs {
+		got = append(got, run.Name)
+	}
+	want := []string{"Categorize Findings", "Verify Findings"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("verification runs = %v, want %v", got, want)
 	}
 }
 

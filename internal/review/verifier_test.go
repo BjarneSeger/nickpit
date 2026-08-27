@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dgrieser/nickpit/internal/config"
 	"github.com/dgrieser/nickpit/internal/llm"
@@ -20,9 +21,15 @@ type scriptedVerifyLLM struct {
 	requests  []*llm.ReviewRequest
 	responses []*llm.ReviewResponse
 	err       error
+	// delay makes each agent call take measurable wall-clock time, so a test
+	// can assert on a recorded runtime instead of a stub's sub-millisecond zero.
+	delay time.Duration
 }
 
 func (s *scriptedVerifyLLM) Review(_ context.Context, req *llm.ReviewRequest) (*llm.ReviewResponse, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -69,10 +76,14 @@ func testVerify(e *Engine, ctx context.Context, req VerifyRequest) (*model.Findi
 }
 
 func testVerifyAll(e *Engine, ctx context.Context, reviewCtx *model.ReviewContext, findings []model.Finding, opts VerifyOptions) ([]*model.FindingVerification, model.TokenUsage, []string, error) {
-	results, usage, _, warnings, err := e.verifyAll(ctx, reviewCtx, findings, opts)
+	results, run, warnings, err := e.verifyAll(ctx, reviewCtx, findings, opts)
 	verifications := make([]*model.FindingVerification, len(results))
 	for i := range results {
 		verifications[i] = results[i].Verification
+	}
+	usage := model.TokenUsage{}
+	if run != nil {
+		usage = run.TokensUsed
 	}
 	return verifications, usage, warnings, err
 }
@@ -199,6 +210,100 @@ func assertFallbackUnverified(t *testing.T, v *model.FindingVerification, priori
 	}
 	if v.Verdict != model.VerdictUnverified || v.Priority != priority || v.ConfidenceScore != 0 || v.Remarks != "" {
 		t.Fatalf("verification = %#v, want unverified priority %d confidence 0 with empty remarks", v, priority)
+	}
+}
+
+// The verify step is one AgentRun for the whole fan-out, not one per finding:
+// its runtime is the step's wall-clock span, and its tokens and tool calls are
+// the totals the caller folds into the verify phase buckets.
+func TestVerifyAllRecordsStepAgentRun(t *testing.T) {
+	llmClient := &scriptedVerifyLLM{delay: 20 * time.Millisecond}
+	engine := NewEngine(stubSource{}, llmClient, stubRetrieval{}, config.Profile{Model: "test"})
+
+	findings := []model.Finding{
+		{Title: "first", Body: "b1", Priority: intPtr(1), CodeLocation: model.CodeLocation{FilePath: "a.go", LineRange: model.LineRange{Start: 1, End: 1}}},
+		{Title: "second", Body: "b2", Priority: intPtr(2), CodeLocation: model.CodeLocation{FilePath: "b.go", LineRange: model.LineRange{Start: 2, End: 2}}},
+	}
+	_, run, _, err := engine.verifyAll(context.Background(), sampleReviewCtx(), findings, VerifyOptions{Limiter: NewLimiter(1), MaxToolCalls: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil {
+		t.Fatal("verifyAll recorded no AgentRun")
+	}
+	if run.Name != "Verify Findings" || run.Role != "verify" {
+		t.Fatalf("run identity = %q/%q, want Verify Findings/verify", run.Name, run.Role)
+	}
+	if run.Findings != len(findings) {
+		t.Fatalf("run findings = %d, want %d", run.Findings, len(findings))
+	}
+	if run.TokensUsed.TotalTokens != len(findings)*2 {
+		t.Fatalf("run tokens = %d, want %d", run.TokensUsed.TotalTokens, len(findings)*2)
+	}
+	if run.MaxToolCalls != 7 {
+		t.Fatalf("run max tool calls = %d, want the configured 7", run.MaxToolCalls)
+	}
+	if run.RuntimeSeconds <= 0 {
+		t.Fatalf("run runtime = %v, want the fan-out span", run.RuntimeSeconds)
+	}
+	if run.Status != model.AgentRunStatusOK {
+		t.Fatalf("run status = %q, want the implicit ok", run.Status)
+	}
+}
+
+// Nothing to verify means no run at all, so an empty step does not show up as a
+// zero-runtime agent in the review's telemetry.
+func TestVerifyAllRecordsNoRunWithoutFindings(t *testing.T) {
+	engine := NewEngine(stubSource{}, &scriptedVerifyLLM{}, stubRetrieval{}, config.Profile{Model: "test"})
+	_, run, _, err := engine.verifyAll(context.Background(), sampleReviewCtx(), nil, VerifyOptions{Limiter: NewLimiter(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run != nil {
+		t.Fatalf("run = %+v, want none for an empty verify step", run)
+	}
+}
+
+// A verifier that repeats a tool request must report it: the step run carries the
+// duplicate count next to the total, so a review where duplicate-call limiting
+// fired cannot serialize as zero duplicates.
+func TestVerifyAllRecordsDuplicateToolCalls(t *testing.T) {
+	llmClient := &scriptedVerifyLLM{
+		responses: []*llm.ReviewResponse{
+			// Attempt 1: fetch main.go, then finish without a verification.
+			{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "inspect_file", Arguments: `{"path":"main.go"}`}}},
+			{RawResponse: "still no verification"},
+			// Attempt 2 repeats the same fetch, which the shared loop state dedupes.
+			{ToolCalls: []llm.ToolCall{{ID: "c2", Name: "inspect_file", Arguments: `{"path":"main.go"}`}}},
+			{Verification: &model.FindingVerification{Verdict: model.VerdictConfirmed, Priority: 1, ConfidenceScore: 0.9, Remarks: "confirmed"}},
+		},
+	}
+	engine := NewEngine(stubSource{}, llmClient, &countingRetrieval{}, config.Profile{Model: "test"})
+
+	findings := []model.Finding{
+		{Title: "x", Body: "x", Priority: intPtr(1), CodeLocation: model.CodeLocation{FilePath: "main.go", LineRange: model.LineRange{Start: 1, End: 1}}},
+	}
+	_, run, _, err := engine.verifyAll(context.Background(), sampleReviewCtx(), findings, VerifyOptions{
+		Limiter:               NewLimiter(1),
+		MaxToolCalls:          4,
+		MaxDuplicateToolCalls: 5,
+		MaxOutputRetries:      2,
+		RepoRoot:              "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil {
+		t.Fatal("verifyAll recorded no AgentRun")
+	}
+	if run.DuplicateToolCalls != 1 {
+		t.Fatalf("run duplicate tool calls = %d, want the one deduped repeat", run.DuplicateToolCalls)
+	}
+	if run.ToolCalls != 2 {
+		t.Fatalf("run tool calls = %d, want both requests counted", run.ToolCalls)
+	}
+	if run.MaxDuplicateToolCalls != 5 {
+		t.Fatalf("run max duplicate tool calls = %d, want the configured 5", run.MaxDuplicateToolCalls)
 	}
 }
 
