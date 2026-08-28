@@ -288,9 +288,10 @@ func (e *Engine) reviewerComputeExtractDelta(ctx context.Context, s *reviewerSes
 
 // reviewerNudgeTurn runs one nudge round against the session, appending any new
 // findings. The shared nudge agent-loop state pools the tool/JSON budgets across
-// rounds; the reasoning effort baseline is reset once (lazily) then carried
-// forward. Returns false (and records nudgeErr) when the round fails, so callers
-// stop and keep the prior findings as a partial result.
+// rounds, while the one-shot code-location retry resets for each round; the
+// reasoning effort baseline is reset once (lazily) then carried forward. Returns
+// false (and records nudgeErr) when the round fails, so callers stop and keep the
+// prior findings as a partial result.
 // warnNudgePhaseStopped reports a reviewer whose nudge rounds were cut short by
 // a phase time budget. The reviewer itself still succeeds — it simply reviewed
 // less than the workflow asked for — so without this the truncation shows up
@@ -305,6 +306,10 @@ func (e *Engine) reviewerNudgeTurn(nudgeCtx context.Context, s *reviewerSession,
 	if s.nudgeState == nil {
 		s.nudgeState = newAgentLoopState()
 	}
+	// Each nudge is a fresh review turn and may produce its own bad anchor. Keep
+	// the shared tool/JSON accounting, but allow one targeted location retry per
+	// round.
+	s.nudgeState.codeLocationRetried = false
 	if s.nudgeReasoningEffort == "" {
 		s.nudgeReasoningEffort = e.config.ReasoningEffort
 	}
