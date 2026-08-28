@@ -52,7 +52,7 @@ func TestDefaultSpecMatchesConstants(t *testing.T) {
 	reviewer := ScopeReviewer
 	max300 := 300
 	max1200 := 1200
-	max1800 := 1800
+	max2100 := 2100
 	weight10 := 10
 	weight15 := 15
 	weight20 := 20
@@ -73,9 +73,9 @@ func TestDefaultSpecMatchesConstants(t *testing.T) {
 	for i, id := range ReviewVectorIDs {
 		parallel[i] = StepEntry{Name: laneNames[i], Lane: []StepEntry{
 			{Type: StepReviewPrefix + id, Config: reviewConfig()},
-			{Type: StepVerifyPrefix + id, Config: &StepOverride{Scope: &finding, TimeBudget: &TimeBudget{Weight: &weight30}, Categorize: &AgentOverride{Model: &small, TimeBudget: &TimeBudget{Weight: &weight10}}}},
+			{Type: StepVerifyPrefix + id, Config: &StepOverride{Scope: &finding, TimeBudget: &TimeBudget{Weight: &weight30}, Categorize: &AgentOverride{Model: &small, TimeBudget: &TimeBudget{Weight: &weight15}}}},
 			{Type: StepDedupePrefix + id, Config: &StepOverride{Scope: &reviewer, TimeBudget: &TimeBudget{Weight: &weight15}, Context: fullContext()}},
-		}, Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max1800}}}
+		}, Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max2100}}}
 	}
 	want := Spec{Version: SpecVersion, Name: "Standard review", Steps: []StepEntry{
 		{Type: StepCollectContext, Name: "Context", Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max300}}},
