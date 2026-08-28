@@ -912,6 +912,55 @@ func TestExecuteSearchLiteralWhenOptimizationDisabled(t *testing.T) {
 	}
 }
 
+func TestExecuteSearchFallsBackToLiteralRegexWhenPatternIsInvalid(t *testing.T) {
+	tests := []struct {
+		name          string
+		query         string
+		caseSensitive bool
+		wantPattern   string
+	}{
+		{
+			name:        "unescaped code brackets",
+			query:       "var All = []gate.Definition{}",
+			wantPattern: `(?i)var All = \[\]gate\.Definition\{\}`,
+		},
+		{
+			name:          "leading repeat operator",
+			query:         "+kubebuilder:rbac:groups=apps,resources=deployments",
+			caseSensitive: true,
+			wantPattern:   `\+kubebuilder:rbac:groups=apps,resources=deployments`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			retrievalEngine := &countingRetrieval{hasCustomResults: true}
+			engine := NewEngine(stubSource{}, &capturingLLM{}, retrievalEngine, config.Profile{Model: "test"})
+			engine.SetSearchToolOptimization(false)
+			arguments := mustToolResultJSON(map[string]any{
+				"query":          tt.query,
+				"case_sensitive": tt.caseSensitive,
+			})
+
+			results := engine.executeToolCalls(context.Background(), "", []llm.ToolCall{
+				{ID: "c1", Name: "search", Arguments: arguments},
+			}, freshToolRoundState())
+
+			payload := decodeToolPayload(t, results[0].Content)
+			if _, isErr := payload["error"]; isErr {
+				t.Fatalf("search returned error: %#v", payload)
+			}
+			if len(retrievalEngine.paths) != 2 {
+				t.Fatalf("retrieval paths = %#v, want literal and regex searches", retrievalEngine.paths)
+			}
+			wantRegexPath := fmt.Sprintf("search_regex::%s:5:0", tt.wantPattern)
+			if got := retrievalEngine.paths[1]; got != wantRegexPath {
+				t.Fatalf("fallback regex path = %q, want %q", got, wantRegexPath)
+			}
+		})
+	}
+}
+
 func TestExecuteSearchFindsLineAndBlock(t *testing.T) {
 	repoRoot := t.TempDir()
 	writeRepoFile(t, repoRoot, "cmd/main.go", "package main\n\nfunc main() {\n\tfmt.Println(\"hi\")\n}\n")
