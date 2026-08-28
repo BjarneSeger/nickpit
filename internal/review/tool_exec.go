@@ -571,19 +571,24 @@ func (e *Engine) searchToolResult(ctx context.Context, repoRoot string, toolCall
 		if !args.CaseSensitive {
 			regexPattern = "(?i)" + regexPattern
 		}
-		if compiled, compileErr := regexp.Compile(regexPattern); compileErr == nil {
-			e.logf(ctx, "Executing regex search: name=%s path=%s pattern=%q context_lines=%d max_results=%d", toolCall.Name, normalizedPath, compiled.String(), contextLines, args.MaxResults)
-			regexResults, err := e.retrieval.SearchRegex(ctx, repoRoot, normalizedPath, compiled, contextLines, args.MaxResults)
-			if err != nil {
-				return searchToolError(toolError(normalizedPath, "retrieval_failed", err.Error()))
+		compiled, compileErr := regexp.Compile(regexPattern)
+		if compileErr != nil {
+			literalPattern := regexp.QuoteMeta(args.Query)
+			if !args.CaseSensitive {
+				literalPattern = "(?i)" + literalPattern
 			}
-			merged := mergeSearchResults(results.Results, regexResults.Results, args.MaxResults)
-			results.Results = merged
-			results.ResultCount = len(merged)
-			results.TruncatedFiles = mergeTruncatedFiles(results.TruncatedFiles, regexResults.TruncatedFiles)
-		} else {
-			e.logf(ctx, "Skipping regex search: name=%s path=%s pattern=%q error=%v", toolCall.Name, normalizedPath, regexPattern, compileErr)
+			compiled = regexp.MustCompile(literalPattern)
+			e.logf(ctx, "Falling back to literal regex search: name=%s path=%s pattern=%q escaped_pattern=%q error=%v", toolCall.Name, normalizedPath, regexPattern, compiled.String(), compileErr)
 		}
+		e.logf(ctx, "Executing regex search: name=%s path=%s pattern=%q context_lines=%d max_results=%d", toolCall.Name, normalizedPath, compiled.String(), contextLines, args.MaxResults)
+		regexResults, err := e.retrieval.SearchRegex(ctx, repoRoot, normalizedPath, compiled, contextLines, args.MaxResults)
+		if err != nil {
+			return searchToolError(toolError(normalizedPath, "retrieval_failed", err.Error()))
+		}
+		merged := mergeSearchResults(results.Results, regexResults.Results, args.MaxResults)
+		results.Results = merged
+		results.ResultCount = len(merged)
+		results.TruncatedFiles = mergeTruncatedFiles(results.TruncatedFiles, regexResults.TruncatedFiles)
 	}
 
 	if e.searchToolOptimization {

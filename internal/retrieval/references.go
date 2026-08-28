@@ -2111,10 +2111,7 @@ func sameGoObject(fset *token.FileSet, obj types.Object, selected goReferenceCan
 func goCandidateTarget(candidate *goReferenceCandidate, lines *referenceLineCache) ReferenceTarget {
 	parents := candidate.parentMap()
 	node := goDefinitionNode(candidate.ident, parents)
-	start, end := candidate.pkg.Fset.Position(candidate.ident.Pos()).Line, candidate.pkg.Fset.Position(candidate.ident.End()).Line
-	if node != nil {
-		start, end = candidate.pkg.Fset.Position(node.Pos()).Line, candidate.pkg.Fset.Position(node.End()).Line
-	}
+	start, end := candidate.pkg.Fset.Position(node.Pos()).Line, candidate.pkg.Fset.Position(node.End()).Line
 	source := sourceLines(lines, candidate.path)
 	return ReferenceTarget{Name: candidate.ident.Name, Kind: goObjectKind(candidate.obj, candidate.ident, parents), Definition: rangeLocation(candidate.path, "go", source, start, end)}
 }

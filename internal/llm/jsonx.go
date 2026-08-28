@@ -203,7 +203,7 @@ func LenientUnmarshalMerge(content string, v any, fallbacks ...FallbackType) err
 	accumulator.Elem().Set(reflect.ValueOf(v).Elem())
 	merged := false
 
-	_, isMergeable := accumulator.Interface().(Mergeable)
+	_, isMergeable := reflect.TypeAssert[Mergeable](accumulator)
 	for _, extracted := range candidates {
 		parsed, decoded, ok := tryParseCandidate(extracted, elemType)
 		if ok {
