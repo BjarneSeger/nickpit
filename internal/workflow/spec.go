@@ -238,8 +238,10 @@ type StepOverride struct {
 	// smaller model. Its time_budget weight (1..99) splits the verify step's
 	// budget between the two phases: the classifier gets that share and the
 	// verifier takes the rest, so a stalling classifier can no longer eat the
-	// whole step and leave the verifier nothing. Without one, both phases share
-	// the step budget as a single unit.
+	// whole step and leave the verifier nothing. Only the weight splits — a
+	// categorize time_budget carrying just max_seconds/speedup_threshold bounds
+	// the classifier and leaves the verifier the undivided step budget — and with
+	// no categorize time_budget at all both phases share that budget as one unit.
 	Categorize *AgentOverride `yaml:"categorize"`
 
 	// Dedupe/merge-only prompt trimming, accepted only under config on

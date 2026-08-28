@@ -233,13 +233,20 @@ func disabledVerifyPhaseBudgets(ctx context.Context) verifyPhaseBudgets {
 	}
 }
 
-// verifyPhaseBudgetStarters splits the verify step's budget between its two
-// phases. The split happens only when the spec gives categorize a time_budget;
-// without one both phases share the step budget as a single unit, which is the
-// historical behavior. Only the classifier carries a weight — the verifier takes
-// the remainder — so a classifier stalling on an unresponsive endpoint can no
-// longer consume the whole step and leave the verifier zero seconds, which is
-// how unverified findings reached a published review.
+// verifyPhaseBudgetStarters divides the verify step's budget between its two
+// phases. Only a categorize weight splits the step: the classifier gets that
+// share and the verifier takes the remainder, so a classifier stalling on an
+// unresponsive endpoint can no longer consume the whole step and leave the
+// verifier zero seconds, which is how unverified findings reached a published
+// review.
+//
+// A categorize time_budget without a weight — max_seconds and/or
+// speedup_threshold only — is NOT a split. It bounds the classifier in absolute
+// terms and leaves the verifier on the step's own budget, undivided. Deriving
+// shares from it would be worse than ignoring it: resolvedTimeWeights reads a
+// weightless budget as unset, and with the verifier also unset both phases would
+// take an even half, cancelling verification at the halfway mark of a step that
+// still had time left.
 func verifyPhaseBudgetStarters(ctx context.Context, scope string, override *workflow.StepOverride, req model.ReviewRequest, logf timeBudgetLogFunc) verifyPhaseBudgets {
 	if req.DisableWorkflowTimeBudget || override == nil {
 		return disabledVerifyPhaseBudgets(ctx)
@@ -247,6 +254,16 @@ func verifyPhaseBudgetStarters(ctx context.Context, scope string, override *work
 	categorizeTB := agentTimeBudget(override.Categorize)
 	if categorizeTB == nil {
 		return disabledVerifyPhaseBudgets(ctx)
+	}
+	if categorizeTB.Weight == nil {
+		// The classifier still gets its own budget so an absolute cap is honored
+		// rather than silently dropped; the verifier stays on the step context
+		// untouched, which keeps its limit and speedup threshold measured against
+		// the whole step.
+		return verifyPhaseBudgets{
+			categorize: newTimeBudgetStarter(ctx, categorizeTB, childTimePlan{}, true, scope+":categorize", logf),
+			verify:     newTimeBudgetStarter(ctx, nil, childTimePlan{}, false, "", nil),
+		}
 	}
 	// The verifier's nil budget is what makes it the remainder: resolvedTimeWeights
 	// hands every unset weight an equal share of what the explicit ones leave.
