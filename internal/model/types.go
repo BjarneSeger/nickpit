@@ -64,6 +64,9 @@ type ReviewRequest struct {
 	VerifyDropPolicy    string
 	ConfidenceThreshold float64
 	NudgeCount          int
+	// ForceAllNudges disables the zero-yield early stop for automatic nudge
+	// rounds. Explicit standalone nudge steps always run regardless.
+	ForceAllNudges bool
 	// MaxFindings caps the findings each review agent may report across its
 	// initial pass and nudges; 0 = unlimited.
 	MaxFindings               int

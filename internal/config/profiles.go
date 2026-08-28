@@ -137,6 +137,9 @@ func mergeProfiles(base, override Profile) Profile {
 	} else if override.NudgeCount != 0 {
 		base.NudgeCount = override.NudgeCount
 	}
+	if override.ForceAllNudges {
+		base.ForceAllNudges = true
+	}
 	if override.MaxFindingsConfigured {
 		base.MaxFindingsConfigured = true
 		base.MaxFindings = override.MaxFindings

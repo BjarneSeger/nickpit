@@ -945,11 +945,10 @@ func cloneTestMessages(messages []llm.Message) []llm.Message {
 	return cloned
 }
 
-func TestRunAgent_NudgeDuplicate(t *testing.T) {
+func TestRunAgent_NudgeDuplicateStopsRemainingRounds(t *testing.T) {
 	first := nudgeFinding("A", 1)
 	second := nudgeFinding("B", 2)
 	duplicate := nudgeFinding("A", 1)
-	third := nudgeFinding("C", 3)
 	llmClient := &scriptedLLM{
 		results: []scriptedLLMResult{
 			{resp: nudgeReviewResponse("first", 1, first)},
@@ -959,7 +958,6 @@ func TestRunAgent_NudgeDuplicate(t *testing.T) {
 				return resp
 			}()},
 			{resp: nudgeReviewResponse("duplicate", 3, duplicate)},
-			{resp: nudgeReviewResponse("third", 4, third)},
 		},
 	}
 	engine := nudgeTestEngine(llmClient)
@@ -968,19 +966,19 @@ func TestRunAgent_NudgeDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := findingTitles(result.resp.Findings), []string{"A", "B", "C"}; !reflect.DeepEqual(got, want) {
+	if got, want := findingTitles(result.resp.Findings), []string{"A", "B"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("findings = %#v, want %#v", got, want)
 	}
-	if result.run.Findings != 3 {
-		t.Fatalf("agent run findings = %d", result.run.Findings)
+	if result.run.Findings != 2 {
+		t.Fatalf("agent run findings = %d, want 2", result.run.Findings)
 	}
-	if result.run.TokensUsed.TotalTokens != 10 {
-		t.Fatalf("tokens = %d", result.run.TokensUsed.TotalTokens)
+	if result.run.TokensUsed.TotalTokens != 6 {
+		t.Fatalf("tokens = %d, want 6", result.run.TokensUsed.TotalTokens)
 	}
-	if len(llmClient.reqs) != 4 {
-		t.Fatalf("llm calls = %d, want 4", len(llmClient.reqs))
+	if len(llmClient.reqs) != 3 {
+		t.Fatalf("llm calls = %d, want 3 (third nudge skipped)", len(llmClient.reqs))
 	}
-	wantEfforts := []string{"high", "high", "low", "low"}
+	wantEfforts := []string{"high", "high", "low"}
 	for i, req := range llmClient.reqs {
 		if req.ReasoningEffort != wantEfforts[i] {
 			t.Fatalf("call %d reasoning effort = %q, want %q", i+1, req.ReasoningEffort, wantEfforts[i])
@@ -999,6 +997,60 @@ func TestRunAgent_NudgeDuplicate(t *testing.T) {
 				t.Fatalf("nudge %d retained previous nudge content: %#v", i+1, got)
 			}
 		}
+	}
+}
+
+func TestRunAgent_ForceAllNudgesContinuesAfterDuplicate(t *testing.T) {
+	first := nudgeFinding("A", 1)
+	second := nudgeFinding("B", 2)
+	duplicate := nudgeFinding("A", 1)
+	third := nudgeFinding("C", 3)
+	llmClient := &scriptedLLM{
+		results: []scriptedLLMResult{
+			{resp: nudgeReviewResponse("first", 1, first)},
+			{resp: nudgeReviewResponse("second", 2, second)},
+			{resp: nudgeReviewResponse("duplicate", 3, duplicate)},
+			{resp: nudgeReviewResponse("third", 4, third)},
+		},
+	}
+	engine := nudgeTestEngine(llmClient)
+
+	result, err := engine.runAgent(context.Background(), nudgeTestAgent("review"), model.ReviewRequest{
+		NudgeCount:     3,
+		ForceAllNudges: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := findingTitles(result.resp.Findings), []string{"A", "B", "C"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings = %#v, want %#v", got, want)
+	}
+	if len(llmClient.reqs) != 4 {
+		t.Fatalf("llm calls = %d, want initial plus all three nudges", len(llmClient.reqs))
+	}
+	if result.run.TokensUsed.TotalTokens != 10 {
+		t.Fatalf("tokens = %d, want 10", result.run.TokensUsed.TotalTokens)
+	}
+}
+
+func TestRunAgent_EmptyInitialPassStillRunsFirstNudge(t *testing.T) {
+	llmClient := &scriptedLLM{
+		results: []scriptedLLMResult{
+			{resp: nudgeReviewResponse("initial", 1)},
+			{resp: nudgeReviewResponse("nudge", 2, nudgeFinding("A", 1))},
+		},
+	}
+	engine := nudgeTestEngine(llmClient)
+
+	result, err := engine.runAgent(context.Background(), nudgeTestAgent("review"), model.ReviewRequest{NudgeCount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := findingTitles(result.resp.Findings), []string{"A"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings = %#v, want %#v", got, want)
+	}
+	if len(llmClient.reqs) != 2 {
+		t.Fatalf("llm calls = %d, want initial plus first nudge", len(llmClient.reqs))
 	}
 }
 

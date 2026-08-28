@@ -732,6 +732,42 @@ func TestWorkflowStandaloneNudgeStep(t *testing.T) {
 	}
 }
 
+// Explicit standalone nudge steps remain authoritative: a zero-yield round
+// must not suppress a later step listed by the workflow author.
+func TestWorkflowStandaloneNudgeStepsContinueAfterZeroYield(t *testing.T) {
+	client := &multiAgentLLM{}
+	engine := NewEngine(stubSource{}, client, stubRetrieval{}, config.Profile{Model: "test"})
+	engine.SetLogger(logging.New(os.Stderr, false, false))
+
+	zero := 0
+	spec := workflow.Spec{
+		Version: workflow.SpecVersion,
+		Steps: []workflow.StepEntry{
+			{Type: workflow.StepReviewPrefix + "security", Config: &workflow.StepOverride{NudgeCount: &zero}},
+			{Type: workflow.StepNudgePrefix + "security"},
+			{Type: workflow.StepNudgePrefix + "security"},
+		},
+	}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = engine.RunSpecPipeline(context.Background(), pipeline, model.ReviewRequest{
+		Mode:             model.ModeLocal,
+		RepoRoot:         ".",
+		MaxContextTokens: 1000,
+		MaxToolCalls:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Initial pass uses two calls. Both standalone nudges return only the same
+	// existing finding, yet both explicit steps still execute.
+	if got := client.vectorCalls["Security"]; got != 4 {
+		t.Fatalf("Security reviewer calls = %d, want 4 (init tool + init final + two nudges)", got)
+	}
+}
+
 // A standalone nudge step is skipped outright when the reviewer session already
 // reached its max_findings limit: the round could only return findings destined
 // to be cut.
