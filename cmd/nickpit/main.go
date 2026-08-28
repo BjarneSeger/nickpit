@@ -215,6 +215,7 @@ type app struct {
 	maxRateLimitDelaySecondsSet   bool
 	nudgeCount                    int
 	nudgeCountSet                 bool
+	forceAllNudges                bool
 	maxFindings                   int
 	maxFindingsSet                bool
 	priorityThreshold             string
@@ -395,6 +396,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.maxReasoningSeconds, &cli.maxReasoningSecondsSet), "max-reasoning-seconds", "Maximum seconds to allow reasoning before falling back to lower effort")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.maxRateLimitDelaySeconds, &cli.maxRateLimitDelaySecondsSet), "max-rate-limit-delay-seconds", "Maximum seconds to wait for rate-limit reset times parsed from 429 responses (0 disables)")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.nudgeCount, &cli.nudgeCountSet), "nudge-count", "Number of nudge rounds asking each reviewer to look again (0 disables)")
+	root.PersistentFlags().BoolVar(&cli.forceAllNudges, "force-all-nudges", false, "Run all configured nudge rounds even after a round adds no new findings")
 	root.PersistentFlags().Var(newTrackedIntValue(&cli.maxFindings, &cli.maxFindingsSet), "max-findings", "Maximum findings each review agent may report; weakest findings are cut when exceeded (0 = unlimited)")
 	root.PersistentFlags().StringVar(&cli.priorityThreshold, "priority-threshold", "3", "Minimum priority to display: 0 (highest) to 3 (lowest)")
 	// The default is the empty string, not config.DefaultConfigPath: an empty
@@ -695,6 +697,7 @@ func (a *app) loadProfile() (string, config.Profile, error) {
 		ReasoningSeconds:          reasoningSeconds,
 		RateLimitDelaySeconds:     rateLimitDelaySeconds,
 		NudgeCount:                nudgeCount,
+		ForceAllNudges:            a.forceAllNudges,
 		MaxFindings:               maxFindings,
 		MaxSessions:               maxSessions,
 		DisablePatchSummary:       a.disablePatchSummary,
@@ -1716,6 +1719,9 @@ func (a *app) runReview(ctx context.Context, source model.ReviewSource, retrieva
 	req.DisableParallelToolCalls = a.disableParallelToolCalls
 	req.DisableDiffScope = a.disableDiffScope
 	req.DisableReasoningExtract = a.disableReasoningExtract
+	if profile.ForceAllNudges {
+		req.ForceAllNudges = true
+	}
 	req.Concurrency = a.concurrency
 	req.VerifyDropPolicy = a.verifyDropPolicy
 	req.ConfidenceThreshold = a.confidenceThreshold
@@ -3374,6 +3380,9 @@ func agentSummary(profile config.Profile, req model.ReviewRequest) string {
 		disablable(profile.MaxRateLimitDelaySeconds, "s", "rate-limit-delay"),
 		unlimited(req.Concurrency, "", "concurrency"),
 		unlimited(req.MaxToolCalls, "", "tool calls"),
+	}
+	if req.ForceAllNudges {
+		flags = append(flags, "force all nudges")
 	}
 	// Unset (0) means unlimited and is the default; only surface a real cap.
 	if req.MaxFindings > 0 {

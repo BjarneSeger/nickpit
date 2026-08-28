@@ -297,6 +297,28 @@ profiles:
 	}
 }
 
+func TestLoadConfigForceAllNudges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+profiles:
+  default:
+    model: test-model
+    force_all_nudges: true
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, profile, err := Load(path, Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.ForceAllNudges {
+		t.Fatal("expected force_all_nudges to be enabled")
+	}
+}
+
 func TestLoadConfigDisableSuggestions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

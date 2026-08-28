@@ -79,6 +79,7 @@ type Profile struct {
 	MaxReasoningSeconds       int                    `yaml:"max_reasoning_seconds"`
 	MaxRateLimitDelaySeconds  int                    `yaml:"max_rate_limit_delay_seconds"`
 	NudgeCount                int                    `yaml:"nudge_count"`
+	ForceAllNudges            bool                   `yaml:"force_all_nudges"`
 	MaxFindings               int                    `yaml:"max_findings"`
 	MaxSessions               int                    `yaml:"max_sessions"`
 	DisablePatchSummary       bool                   `yaml:"disable_patch_summary"`
@@ -183,6 +184,7 @@ type Overrides struct {
 	ReasoningSeconds          *int
 	RateLimitDelaySeconds     *int
 	NudgeCount                *int
+	ForceAllNudges            bool
 	MaxFindings               *int
 	MaxSessions               *int
 	DisablePatchSummary       bool
@@ -958,6 +960,9 @@ func applyOverrides(profile Profile, overrides Overrides) (Profile, error) {
 	if overrides.NudgeCount != nil {
 		profile.NudgeCount = *overrides.NudgeCount
 		profile.NudgeCountConfigured = true
+	}
+	if overrides.ForceAllNudges {
+		profile.ForceAllNudges = true
 	}
 	if overrides.MaxFindings != nil {
 		profile.MaxFindings = *overrides.MaxFindings

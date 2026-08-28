@@ -436,6 +436,32 @@ profiles:
 	}
 }
 
+func TestLoadProfileAppliesForceAllNudges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+profiles:
+  default:
+    model: test-model
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := &app{
+		profile:        "default",
+		configPath:     path,
+		forceAllNudges: true,
+	}
+	_, profile, err := app.loadProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.ForceAllNudges {
+		t.Fatal("expected force all nudges CLI override")
+	}
+}
+
 func TestNormalizePriorityThreshold(t *testing.T) {
 	for in, want := range map[string]string{"0": "p0", "1": "p1", "2": "p2", "3": "p3"} {
 		got, err := model.NormalizePriorityThreshold(in)
@@ -685,6 +711,9 @@ func TestRootCmdDropsVerifySkipFlags(t *testing.T) {
 	}
 	if cmd.PersistentFlags().Lookup("disable-reasoning-extract") == nil {
 		t.Fatal("disable-reasoning-extract flag missing")
+	}
+	if cmd.PersistentFlags().Lookup("force-all-nudges") == nil {
+		t.Fatal("force-all-nudges flag missing")
 	}
 	// Flags whose effective default comes from config must advertise it, or
 	// --help tells the user the opposite of what the run will do.
@@ -1415,6 +1444,7 @@ func TestAgentSummaryFlagsAndOrder(t *testing.T) {
 	req := model.ReviewRequest{
 		DisableJSONResponseFormat: false,
 		NudgeCount:                3,
+		ForceAllNudges:            true,
 		MaxFindings:               10,
 		MaxOutputRetries:          5,
 		MaxReasoningSeconds:       300,
@@ -1428,7 +1458,7 @@ func TestAgentSummaryFlagsAndOrder(t *testing.T) {
 		PriorityThreshold:         "p1",
 	}
 	got := agentSummary(profile, req)
-	want := "Structured ≤3 nudges, ≤5 retries, ≤300s reasoning, ≤300s rate-limit-delay, ≤15 concurrency, ∞ tool calls, ≤10 findings, parallel, ≤5 duplicates, no suggestions, no patch summary, no reasoning extract, drop refuted-only, confidence ≥0.7, ≥p1"
+	want := "Structured ≤3 nudges, ≤5 retries, ≤300s reasoning, ≤300s rate-limit-delay, ≤15 concurrency, ∞ tool calls, force all nudges, ≤10 findings, parallel, ≤5 duplicates, no suggestions, no patch summary, no reasoning extract, drop refuted-only, confidence ≥0.7, ≥p1"
 	if got != want {
 		t.Fatalf("agentSummary()\n got: %s\nwant: %s", got, want)
 	}

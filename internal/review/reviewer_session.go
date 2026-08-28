@@ -437,11 +437,16 @@ func (e *Engine) reviewerNudges(ctx context.Context, s *reviewerSession, req mod
 			return nil
 		}
 		nudgeCtx := logging.WithProgressInfo(nudgeCtxBase, nudgeEngine.progressInfo(s.agent.role, nudgeName, ""))
+		previousFindings := len(s.totalFindings)
 		if !nudgeEngine.reviewerNudgeTurn(nudgeCtx, s, i, req.NudgeCount, nudgeName, delta, nudgeReq) {
 			nudgeCancel()
 			break
 		}
 		nudgeCancel()
+		if !req.ForceAllNudges && len(s.totalFindings) == previousFindings {
+			e.logf(ctx, "Nudge phase stopped after zero-yield round: completed=%d/%d", i+1, req.NudgeCount)
+			return nil
+		}
 	}
 	return nil
 }
