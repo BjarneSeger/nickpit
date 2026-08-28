@@ -1202,6 +1202,7 @@ type laneEventLLM struct {
 
 	verifyErrFor         string        // fail verify calls for this vector's findings
 	verifyHold           time.Duration // sleep inside each verify/categorize call
+	categorizeHold       time.Duration // sleep inside each categorize call, overriding verifyHold
 	verifyRendezvous     int           // wait until this many verifies are in flight (1s cap)
 	categorizeRendezvous int           // wait until this many categorizes are in flight (1s cap)
 
@@ -1230,7 +1231,13 @@ func (l *laneEventLLM) Review(ctx context.Context, req *llm.ReviewRequest) (*llm
 		}()
 		l.awaitRendezvous(l.categorizeRendezvous, func() int { return l.maxCategorizeInFlight })
 		// Hold alongside verify so a cap of 1 is observable rather than a race.
-		if l.verifyHold > 0 {
+		if hold := l.categorizeHold; hold > 0 {
+			select {
+			case <-time.After(hold):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		} else if l.verifyHold > 0 {
 			time.Sleep(l.verifyHold)
 		}
 		return l.inner.Review(ctx, req)
@@ -1352,6 +1359,141 @@ func laneTestRequest() model.ReviewRequest {
 // vector and emitted in groupOrder — the order the workflow declares the lanes.
 // Two identical reviews must therefore produce the same agent_runs sequence, and
 // each entry must be attributable to its lane by name.
+// A classifier stalling on an unresponsive endpoint must not consume the whole
+// verify step: with a categorize time_budget the classifier is bounded to its
+// own share and the verifier still runs, so findings reach the user verified
+// instead of carrying verdict=unverified.
+// A categorize time_budget carrying only an absolute cap must not be read as a
+// split: the classifier is bounded by its max_seconds and the verifier keeps the
+// whole verify step. Deriving shares from a weightless budget gave both phases an
+// even half, so verification was cancelled at the halfway mark of a step that
+// still had time left.
+func TestVerifyPhaseBudgetsWeightlessCategorizeKeepsStepBudget(t *testing.T) {
+	stepSeconds := 100
+	catSeconds := 5
+	stepCtx, cancel, _ := withConfiguredTimeBudget(context.Background(),
+		&workflow.TimeBudget{MaxSeconds: &stepSeconds}, childTimePlan{}, "step:verify", nil)
+	defer cancel()
+	stepDeadline, ok := stepCtx.Deadline()
+	if !ok {
+		t.Fatal("step context carries no deadline")
+	}
+
+	budgets := verifyPhaseBudgetStarters(stepCtx, "verify", &workflow.StepOverride{
+		Categorize: &workflow.AgentOverride{TimeBudget: &workflow.TimeBudget{MaxSeconds: &catSeconds}},
+	}, model.ReviewRequest{}, nil)
+
+	catCtx, catCancel, catSkipped := budgets.categorize.start()
+	defer catCancel()
+	if catSkipped {
+		t.Fatal("classifier phase skipped")
+	}
+	catDeadline, ok := catCtx.Deadline()
+	if !ok {
+		t.Fatal("classifier context carries no deadline")
+	}
+	if until := time.Until(catDeadline); until > 6*time.Second {
+		t.Fatalf("classifier deadline in %v, want its 5s cap", until)
+	}
+
+	verifyCtx, verifyCancel, verifySkipped := budgets.verify.start()
+	defer verifyCancel()
+	if verifySkipped {
+		t.Fatal("verifier phase skipped")
+	}
+	verifyDeadline, ok := verifyCtx.Deadline()
+	if !ok {
+		t.Fatal("verifier context carries no deadline")
+	}
+	if !verifyDeadline.Equal(stepDeadline) {
+		t.Fatalf("verifier deadline = %v, want the step's own %v (no split without a weight)", verifyDeadline, stepDeadline)
+	}
+}
+
+// With a weight, the classifier takes that share and the verifier the remainder.
+func TestVerifyPhaseBudgetsWeightedCategorizeLeavesRemainderToVerify(t *testing.T) {
+	stepSeconds := 100
+	weight := 10
+	stepCtx, cancel, _ := withConfiguredTimeBudget(context.Background(),
+		&workflow.TimeBudget{MaxSeconds: &stepSeconds}, childTimePlan{}, "step:verify", nil)
+	defer cancel()
+
+	budgets := verifyPhaseBudgetStarters(stepCtx, "verify", &workflow.StepOverride{
+		Categorize: &workflow.AgentOverride{TimeBudget: &workflow.TimeBudget{Weight: &weight}},
+	}, model.ReviewRequest{}, nil)
+
+	catCtx, catCancel, _ := budgets.categorize.start()
+	defer catCancel()
+	catDeadline, ok := catCtx.Deadline()
+	if !ok {
+		t.Fatal("classifier context carries no deadline")
+	}
+	if until := time.Until(catDeadline); until < 8*time.Second || until > 12*time.Second {
+		t.Fatalf("classifier deadline in %v, want ~10%% of the 100s step", until)
+	}
+
+	verifyCtx, verifyCancel, _ := budgets.verify.start()
+	defer verifyCancel()
+	verifyDeadline, ok := verifyCtx.Deadline()
+	if !ok {
+		t.Fatal("verifier context carries no deadline")
+	}
+	if until := time.Until(verifyDeadline); until < 85*time.Second || until > 92*time.Second {
+		t.Fatalf("verifier deadline in %v, want ~90%% of the 100s step", until)
+	}
+}
+
+func TestWorkflowCategorizeBudgetDoesNotStarveVerify(t *testing.T) {
+	inner := &multiAgentLLM{vectorFindings: map[string]int{"Security": 1}}
+	// The classifier holds longer than the whole verify step budget, so without
+	// the split it starves the verifier; with it, it dies inside its own 20%.
+	client := &laneEventLLM{inner: inner, categorizeHold: 2 * time.Second}
+	engine := pipelineTestEngine(client)
+
+	laneSeconds := 3
+	weight := 20
+	spec := workflow.Spec{Version: workflow.SpecVersion, Steps: []workflow.StepEntry{
+		{Type: workflow.StepCollectContext},
+		{Parallel: []workflow.StepEntry{{
+			Lane: []workflow.StepEntry{
+				{Type: workflow.StepReviewPrefix + "security"},
+				{Type: workflow.StepVerifyPrefix + "security", Config: &workflow.StepOverride{
+					Categorize: &workflow.AgentOverride{TimeBudget: &workflow.TimeBudget{Weight: &weight}},
+				}},
+			},
+			Config: &workflow.StepOverride{TimeBudget: &workflow.TimeBudget{MaxSeconds: &laneSeconds}},
+		}}},
+		{Type: workflow.StepMerge},
+	}}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pipeline, err := engine.BuildPipeline(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := engine.RunSpecPipeline(context.Background(), pipeline, laneTestRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	categorizeFailed := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "Categorize") {
+			categorizeFailed = true
+		}
+	}
+	if !categorizeFailed {
+		t.Fatalf("expected the stalled classifier to fail within its share; warnings = %v", result.Warnings)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %d, want the reviewer's one finding", len(result.Findings))
+	}
+	if v := result.Findings[0].Verification; v == nil || v.Verdict == model.VerdictUnverified {
+		t.Fatalf("finding verification = %#v, want the verifier to have run despite the stalled classifier", v)
+	}
+}
+
 func TestPipelineEmitsVerificationRunsInLaneOrder(t *testing.T) {
 	declared := []string{"security", "performance", "testing"}
 	st := newPipelineState(&model.ReviewContext{}, declared)

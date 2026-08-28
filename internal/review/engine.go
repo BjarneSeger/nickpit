@@ -833,14 +833,20 @@ type verificationTelemetry struct {
 // categorize carries the classifier's own engine clone and request, which
 // differ from the verifier's when the verify step configures a categorize
 // override (e.g. model: "@small"); the zero value means "same as the verifier".
-func (e *Engine) verifyAndFilterVectorFindings(ctx context.Context, reviewCtx *model.ReviewContext, vectorResults []agentResult, req model.ReviewRequest, limiter *Limiter, reviewerName string, categorize internalAgentContext) (verificationTelemetry, []string, error) {
+func (e *Engine) verifyAndFilterVectorFindings(ctx context.Context, reviewCtx *model.ReviewContext, vectorResults []agentResult, req model.ReviewRequest, limiter *Limiter, reviewerName string, categorize internalAgentContext, budgets verifyPhaseBudgets) (verificationTelemetry, []string, error) {
 	telemetry := verificationTelemetry{}
 	categorizeEngine, categorizeReq := e, req
 	if categorize.Engine != nil {
 		categorizeEngine, categorizeReq = categorize.Engine, categorize.Req
 	}
 	scopeWarnings := e.prepareFindingsForVerification(ctx, reviewCtx, vectorResults, req)
-	categorizeRun, categorizeWarnings, err := categorizeEngine.categorizeAndFilterVectorFindings(ctx, reviewCtx, vectorResults, categorizeReq, limiter, reviewerName)
+	// The classifier runs inside its own share of the step budget when the spec
+	// gives it one, so its failure mode is a bounded phase rather than the whole
+	// verify step. The verifier's share is started separately below and is not
+	// reduced by however long the classifier took.
+	categorizeCtx, categorizeCancel := budgets.categorize.startOrCanceled()
+	categorizeRun, categorizeWarnings, err := categorizeEngine.categorizeAndFilterVectorFindings(categorizeCtx, reviewCtx, vectorResults, categorizeReq, limiter, reviewerName)
+	categorizeCancel()
 	telemetry.CategorizeRun = categorizeRun
 	if categorizeRun != nil {
 		telemetry.CategorizeUsage = categorizeRun.TokensUsed
@@ -860,7 +866,9 @@ func (e *Engine) verifyAndFilterVectorFindings(ctx context.Context, reviewCtx *m
 	opts := verifyOptionsFromReviewRequest(req)
 	opts.Limiter = limiter
 	opts.ReviewerName = reviewerName
-	verifyResults, verifyRun, verifyWarnings, err := e.verifyAll(ctx, reviewCtx, findings, opts)
+	verifyCtx, verifyCancel := budgets.verify.startOrCanceled()
+	defer verifyCancel()
+	verifyResults, verifyRun, verifyWarnings, err := e.verifyAll(verifyCtx, reviewCtx, findings, opts)
 	telemetry.VerifyRun = verifyRun
 	if verifyRun != nil {
 		telemetry.VerifyUsage = verifyRun.TokensUsed

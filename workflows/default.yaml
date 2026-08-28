@@ -8,13 +8,13 @@ steps:
     config:
       time_budget:
         max_seconds: 300
-  # Each review lane caps at 1800s and its steps split that cap by weight.
-  # verify 25 + dedupe 15 leaves the review step the implicit remainder, 60% = 18m.
-  # Do not write that 60 out as an explicit `weight` on the review step: a weight
+  # Each review lane caps at 2100s and its steps split that cap by weight.
+  # verify 30 + dedupe 15 leaves the review step the implicit remainder, 55% = 19m15s.
+  # Do not write that 55 out as an explicit `weight` on the review step: a weight
   # there also switches on the per-phase split inside the step (main, mine_reasoning,
   # compile_findings, nudge) and the same number is reused as the main phase's share
-  # of the step budget, so `weight: 60` would cut the main review pass to 60% of 18m
-  # instead of leaving the whole 18m for the phases to share.
+  # of the step budget, so `weight: 55` would cut the main review pass to 55% of 19m15s
+  # instead of leaving the whole 19m15s for the phases to share.
   - parallel:
       - lane:
           - type: review:codequality
@@ -27,9 +27,14 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 25
+                weight: 30
               categorize:
                 model: "@small"
+                # The classifier's share of the verify step; the verifier takes
+                # the rest. Bounded because a classifier stalling on the endpoint
+                # used to consume the whole step and ship unverified findings.
+                time_budget:
+                  weight: 15
           - type: dedupe:codequality
             config:
               scope: reviewer
@@ -44,7 +49,7 @@ steps:
         name: Code quality
         config:
           time_budget:
-            max_seconds: 1800
+            max_seconds: 2100
       - lane:
           - type: review:security
             config:
@@ -56,9 +61,14 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 25
+                weight: 30
               categorize:
                 model: "@small"
+                # The classifier's share of the verify step; the verifier takes
+                # the rest. Bounded because a classifier stalling on the endpoint
+                # used to consume the whole step and ship unverified findings.
+                time_budget:
+                  weight: 15
           - type: dedupe:security
             config:
               scope: reviewer
@@ -73,7 +83,7 @@ steps:
         name: Security
         config:
           time_budget:
-            max_seconds: 1800
+            max_seconds: 2100
       - lane:
           - type: review:architecture
             config:
@@ -85,9 +95,14 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 25
+                weight: 30
               categorize:
                 model: "@small"
+                # The classifier's share of the verify step; the verifier takes
+                # the rest. Bounded because a classifier stalling on the endpoint
+                # used to consume the whole step and ship unverified findings.
+                time_budget:
+                  weight: 15
           - type: dedupe:architecture
             config:
               scope: reviewer
@@ -102,7 +117,7 @@ steps:
         name: Architecture
         config:
           time_budget:
-            max_seconds: 1800
+            max_seconds: 2100
       - lane:
           - type: review:performance
             config:
@@ -114,9 +129,14 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 25
+                weight: 30
               categorize:
                 model: "@small"
+                # The classifier's share of the verify step; the verifier takes
+                # the rest. Bounded because a classifier stalling on the endpoint
+                # used to consume the whole step and ship unverified findings.
+                time_budget:
+                  weight: 15
           - type: dedupe:performance
             config:
               scope: reviewer
@@ -131,7 +151,7 @@ steps:
         name: Performance
         config:
           time_budget:
-            max_seconds: 1800
+            max_seconds: 2100
       - lane:
           - type: review:testing
             config:
@@ -143,9 +163,14 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 25
+                weight: 30
               categorize:
                 model: "@small"
+                # The classifier's share of the verify step; the verifier takes
+                # the rest. Bounded because a classifier stalling on the endpoint
+                # used to consume the whole step and ship unverified findings.
+                time_budget:
+                  weight: 15
           - type: dedupe:testing
             config:
               scope: reviewer
@@ -160,7 +185,7 @@ steps:
         name: Testing
         config:
           time_budget:
-            max_seconds: 1800
+            max_seconds: 2100
       - lane:
           - type: review:bestpractices
             config:
@@ -172,9 +197,14 @@ steps:
             config:
               scope: finding
               time_budget:
-                weight: 25
+                weight: 30
               categorize:
                 model: "@small"
+                # The classifier's share of the verify step; the verifier takes
+                # the rest. Bounded because a classifier stalling on the endpoint
+                # used to consume the whole step and ship unverified findings.
+                time_budget:
+                  weight: 15
           - type: dedupe:bestpractices
             config:
               scope: reviewer
@@ -189,7 +219,7 @@ steps:
         name: Best practices
         config:
           time_budget:
-            max_seconds: 1800
+            max_seconds: 2100
     name: Review
   - pipeline:
       - type: merge

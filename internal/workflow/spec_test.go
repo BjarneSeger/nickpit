@@ -52,13 +52,12 @@ func TestDefaultSpecMatchesConstants(t *testing.T) {
 	reviewer := ScopeReviewer
 	max300 := 300
 	max1200 := 1200
-	max1800 := 1800
+	max2100 := 2100
 	weight10 := 10
 	weight15 := 15
 	weight20 := 20
 	weight30 := 30
 	weight40 := 40
-	weight25 := 25
 	reviewConfig := func() *StepOverride {
 		return &StepOverride{
 			MineReasoning:   &AgentOverride{Model: &small},
@@ -74,9 +73,9 @@ func TestDefaultSpecMatchesConstants(t *testing.T) {
 	for i, id := range ReviewVectorIDs {
 		parallel[i] = StepEntry{Name: laneNames[i], Lane: []StepEntry{
 			{Type: StepReviewPrefix + id, Config: reviewConfig()},
-			{Type: StepVerifyPrefix + id, Config: &StepOverride{Scope: &finding, TimeBudget: &TimeBudget{Weight: &weight25}, Categorize: &AgentOverride{Model: &small}}},
+			{Type: StepVerifyPrefix + id, Config: &StepOverride{Scope: &finding, TimeBudget: &TimeBudget{Weight: &weight30}, Categorize: &AgentOverride{Model: &small, TimeBudget: &TimeBudget{Weight: &weight15}}}},
 			{Type: StepDedupePrefix + id, Config: &StepOverride{Scope: &reviewer, TimeBudget: &TimeBudget{Weight: &weight15}, Context: fullContext()}},
-		}, Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max1800}}}
+		}, Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max2100}}}
 	}
 	want := Spec{Version: SpecVersion, Name: "Standard review", Steps: []StepEntry{
 		{Type: StepCollectContext, Name: "Context", Config: &StepOverride{TimeBudget: &TimeBudget{MaxSeconds: &max300}}},
@@ -362,7 +361,6 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 		"non-mapping review internal key": "version: 1\nsteps:\n  - type: review:security\n    config:\n      nudge: small\n",
 		"categorize on review step":       "version: 1\nsteps:\n  - type: review:security\n    config:\n      categorize:\n        model: \"@small\"\n",
 		"categorize on merge":             "version: 1\nsteps:\n  - type: merge\n    config:\n      categorize: {}\n",
-		"categorize time_budget":          "version: 1\nsteps:\n  - type: verify:security\n    config:\n      categorize:\n        time_budget: { weight: 20 }\n",
 		"unknown categorize key":          "version: 1\nsteps:\n  - type: verify\n    config:\n      categorize:\n        bogus: 1\n",
 		"non-mapping categorize":          "version: 1\nsteps:\n  - type: verify\n    config:\n      categorize: small\n",
 		"scalar step":                     "version: 1\nsteps:\n  - merge\n",
@@ -405,6 +403,27 @@ func TestValidateRejections(t *testing.T) {
 			{Type: StepReviewPrefix + "security"},
 			{Type: StepMerge},
 			{Type: StepDedupePrefix + "security"},
+		}},
+		// The verifier takes the weight the classifier leaves, so 100 leaves it none.
+		"categorize weight 100": {Version: 1, Steps: []StepEntry{
+			{Type: StepReviewPrefix + "security"},
+			{Type: StepVerifyPrefix + "security", Config: &StepOverride{
+				Categorize: &AgentOverride{TimeBudget: &TimeBudget{Weight: intPtr(100)}},
+			}},
+		}},
+		"categorize weight over 100": {Version: 1, Steps: []StepEntry{
+			{Type: StepReviewPrefix + "security"},
+			{Type: StepVerify, Config: &StepOverride{
+				Categorize: &AgentOverride{TimeBudget: &TimeBudget{Weight: intPtr(120)}},
+			}},
+		}},
+		// Weight 0 makes the phase optional and unallocated, so the classifier
+		// would inherit the whole verify step deadline instead of a share of it.
+		"categorize weight 0": {Version: 1, Steps: []StepEntry{
+			{Type: StepReviewPrefix + "security"},
+			{Type: StepVerifyPrefix + "security", Config: &StepOverride{
+				Categorize: &AgentOverride{TimeBudget: &TimeBudget{Weight: intPtr(0)}},
+			}},
 		}},
 	}
 	for name, spec := range cases {
