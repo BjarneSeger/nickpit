@@ -1435,6 +1435,48 @@ func TestRunAgent_NudgeBudgetsResetOnceBeforeNudges(t *testing.T) {
 	}
 }
 
+func TestRunAgent_NudgeCodeLocationRetryResetsEachRound(t *testing.T) {
+	allowed := []model.CodeLocation{
+		testLineCodeLocation("main.go", 10),
+		testLineCodeLocation("main.go", 20),
+	}
+	agent := nudgeTestAgent("review")
+	agent.enforceDiffScope = true
+	agent.allowedDiffScopes = allowed
+
+	llmClient := &scriptedLLM{
+		results: []scriptedLLMResult{
+			{resp: nudgeReviewResponse("initial", 1)},
+			{resp: nudgeReviewResponse("nudge one outside diff", 1, nudgeFinding("A", 1))},
+			{resp: nudgeReviewResponse("nudge one fixed", 1, nudgeFinding("A", 10))},
+			{resp: nudgeReviewResponse("nudge two outside diff", 1, nudgeFinding("B", 2))},
+			{resp: nudgeReviewResponse("nudge two fixed", 1, nudgeFinding("B", 20))},
+		},
+	}
+	engine := nudgeTestEngine(llmClient)
+
+	result, err := engine.runAgent(context.Background(), agent, model.ReviewRequest{
+		NudgeCount:       2,
+		MaxOutputRetries: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := findingTitles(result.resp.Findings), []string{"A", "B"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings = %#v, want %#v", got, want)
+	}
+	if len(llmClient.reqs) != 5 {
+		t.Fatalf("llm calls = %d, want initial plus one location retry per nudge", len(llmClient.reqs))
+	}
+	for _, requestIndex := range []int{2, 4} {
+		retryPrompt := joinedRequestContent(llmClient.reqs[requestIndex].Messages)
+		if !strings.Contains(retryPrompt, "Choose a code location inside one of these allowed diff windows") ||
+			!strings.Contains(retryPrompt, `"file_path": "main.go"`) {
+			t.Fatalf("request %d missing allowed code-location retry guidance:\n%s", requestIndex+1, retryPrompt)
+		}
+	}
+}
+
 func TestRunAgent_NudgeReviewerOnly(t *testing.T) {
 	llmClient := &scriptedLLM{
 		results: []scriptedLLMResult{
