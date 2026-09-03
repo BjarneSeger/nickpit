@@ -571,7 +571,7 @@ func TestHandlerChatDeniedPolicyStillSyncsResponseFooter(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	waitFor(t, 2*time.Second, func() bool {
-		return strings.Contains(env.gitlab.discussionBody(), "NickPit responds if you add `/nickpit respond` to your comment")
+		return strings.Contains(env.gitlab.discussionBody(), "NickPit responds if you add `/nickpit respond` on its own line to your comment")
 	})
 }
 

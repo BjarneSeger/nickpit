@@ -152,7 +152,7 @@ func responseStatusText(status ResponseStatus) string {
 		blockers = append(blockers, fmt.Sprintf("remove :%s: from thread", muteEmoji))
 	}
 	if status.CommandMuted {
-		blockers = append(blockers, "add "+command("resume")+" to your comment")
+		blockers = append(blockers, "add "+command("resume")+" on its own line to your comment")
 	}
 	if len(blockers) > 0 {
 		return "NickPit is muted. To unmute, " + strings.Join(blockers, "; ") + "."
@@ -161,14 +161,14 @@ func responseStatusText(status ResponseStatus) string {
 	var muteInstructions []string
 	if muteEmoji != "" {
 		muteInstructions = append(muteInstructions,
-			fmt.Sprintf("react with :%s: on thread or %s", muteEmoji, requestTerm))
+			fmt.Sprintf("react with :%s: on this post to mute this thread or on %s to mute all NickPit threads", muteEmoji, requestTerm))
 	}
-	muteInstructions = append(muteInstructions, "add "+command("mute")+" to your comment")
+	muteInstructions = append(muteInstructions, "add "+command("mute")+" on its own line to your comment")
 	muteText := strings.Join(muteInstructions, ", or ")
 	if status.OptIn {
-		request := "NickPit responds if you add " + command("respond") + " to your comment"
+		request := "NickPit responds if you add " + command("respond") + " on its own line to your comment"
 		if requestEmoji != "" {
-			request += fmt.Sprintf(" or react with :%s:", requestEmoji)
+			request += fmt.Sprintf(" or react with :%s: on the question comment", requestEmoji)
 		}
 		return request + ". To mute, " + muteText + "."
 	}
