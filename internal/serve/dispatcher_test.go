@@ -48,6 +48,11 @@ type fakeGitLab struct {
 	discussionRoot string
 	// discussionReply is the live triggering user note returned after the root.
 	discussionReply string
+	// discussionRootAuthorID overrides the author id of the root note a
+	// discussion GET returns (0 keeps the default 5). Tests that need the bot
+	// to own the thread set it to fakeBotUserID, the id the fake stamps on the
+	// daemon's own awards, so gate and own-award filter agree.
+	discussionRootAuthorID int
 	// failDiscussionGET makes the chat thread gate's discussion GET fail with a
 	// 429, exercising the unconfirmed-gate paths. discussionGETs counts the
 	// gate's read attempts.
@@ -256,8 +261,12 @@ func (f *fakeGitLab) handler() http.Handler {
 				w.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
+			rootAuthorID := f.discussionRootAuthorID
+			if rootAuthorID == 0 {
+				rootAuthorID = 5
+			}
 			notes := []map[string]any{
-				{"id": 900, "body": f.discussionRoot, "system": false, "author": map[string]any{"id": 5, "username": "someone"}},
+				{"id": 900, "body": f.discussionRoot, "system": false, "author": map[string]any{"id": rootAuthorID, "username": "someone"}},
 			}
 			if f.discussionReply != "" {
 				notes = append(notes, map[string]any{"id": 306, "body": f.discussionReply, "system": false, "author": map[string]any{"id": 9, "username": "reviewer"}})

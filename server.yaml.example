@@ -39,7 +39,8 @@ start_emoji: "eyes"
 # respond|comment|unmute|resume.
 command_keyword: "nickpit"
 
-# Emoji the daemon awards on a command comment to acknowledge it ("" disables).
+# Emoji the daemon awards on a command comment to acknowledge it, and on a
+# discussion question while the chat agent answers it ("" disables both).
 ack_emoji: "eyes"
 
 # Emoji the daemon awards on an abort command comment ("" disables).
