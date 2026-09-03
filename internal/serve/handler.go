@@ -680,12 +680,18 @@ func (h *Handler) handleChat(group *Group, projectPath string, projectID int, de
 	// comes off when the event is over, whatever the outcome — a stranded one
 	// would keep promising an answer that is no longer coming.
 	acked := false
-	defer func() {
+	releaseAck := func() {
 		if acked {
 			h.releaseChatAck(group, projectID, decision)
+			acked = false
 		}
-	}()
+	}
+	defer releaseAck()
 	abandon := func() {
+		// Settle this event's reaction before making its dedup key available.
+		// Otherwise a redelivery can reuse the existing same-name award and this
+		// handler's deferred cleanup will revoke the successor's acknowledgement.
+		releaseAck()
 		if dedupMarked {
 			h.chatSeen.forget(decision.NoteID)
 		}
@@ -717,6 +723,7 @@ func (h *Handler) handleChat(group *Group, projectPath string, projectID int, de
 			// confirmed ours. The failure note marks the thread answered, so
 			// re-asking (as the note says) is the recovery, never a surprise
 			// double-answer.
+			releaseAck()
 			if dedupMarked {
 				h.chatSeen.forget(decision.NoteID)
 			}
@@ -882,6 +889,10 @@ func (h *Handler) chatAttempt(ctx context.Context, group *Group, projectPath str
 		// Policy changed after the parent gate admitted the event. Retrying while
 		// muted would waste work, but retaining the mark would suppress a later
 		// explicit request on this note after the thread is unmuted.
+		if *acked {
+			h.releaseChatAck(group, projectID, decision)
+			*acked = false
+		}
 		if *dedupMarked {
 			h.chatSeen.forget(decision.NoteID)
 			*dedupMarked = false

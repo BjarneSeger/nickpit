@@ -99,6 +99,11 @@ type fakeGitLab struct {
 	emojiPostGate    chan struct{}
 	emojiPostArrived atomic.Int32
 	emojiPostGated   atomic.Bool
+	// discussionPostGate holds a discussion reply before the fake records it.
+	// Chat tests use it to inspect acknowledgement state while a terminal
+	// failure reply is in flight.
+	discussionPostGate    chan struct{}
+	discussionPostArrived atomic.Int32
 }
 
 func (f *fakeGitLab) gateReads() int {
@@ -131,6 +136,10 @@ type recordedAward struct {
 
 func (f *fakeGitLab) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.discussionPostGate != nil && r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/discussions/") {
+			f.discussionPostArrived.Add(1)
+			<-f.discussionPostGate
+		}
 		if f.emojiPostGate != nil && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/award_emoji") && f.emojiPostGated.CompareAndSwap(false, true) {
 			f.emojiPostArrived.Add(1)
 			<-f.emojiPostGate

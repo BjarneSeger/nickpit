@@ -854,6 +854,49 @@ func TestHandlerChatReleasesQuestionMarkAfterExhaustedRetries(t *testing.T) {
 	}
 }
 
+// An exhausted event must release its acknowledgement before admitting a
+// redelivery. GitLab keeps only one bot-owned award of a given name, so stale
+// deferred cleanup would otherwise revoke the newer event's reused award.
+func TestHandlerChatReleasesQuestionMarkBeforeAdmittingRedelivery(t *testing.T) {
+	env := newHandlerEnv(t)
+	env.handler.chatRetryDelay = time.Millisecond
+	env.group.BotUserID = fakeBotUserID
+	env.gitlab.discussionRootAuthorID = fakeBotUserID
+	env.gitlab.discussionRoot = reviewFindingBody(model.Finding{ID: "f1"})
+	env.gitlab.discussionPostGate = make(chan struct{})
+	var releasePost sync.Once
+	releaseFailurePost := func() { releasePost.Do(func() { close(env.gitlab.discussionPostGate) }) }
+	t.Cleanup(releaseFailurePost)
+	env.chat.exitCodes = []int{1}
+	decision := Decision{IID: 11, DiscussionID: "disc-306", NoteID: 306}
+
+	done := make(chan struct{})
+	go func() {
+		env.handler.handleChat(env.group, "platform/legacy/tool", 43, decision)
+		close(done)
+	}()
+	waitFor(t, 2*time.Second, func() bool { return env.gitlab.discussionPostArrived.Load() > 0 })
+
+	if !env.handler.chatSeen.markNew(decision.NoteID) {
+		t.Fatal("redelivery not admitted while terminal failure reply is in flight")
+	}
+	if names := env.gitlab.awardedOn(11, 306); len(names) != 0 {
+		t.Fatalf("old acknowledgement still live when redelivery admitted: %v", names)
+	}
+	if err := env.group.Client.AwardNoteEmoji(context.Background(), 43, 11, 306, "white_check_mark"); err != nil {
+		t.Fatalf("award redelivery acknowledgement: %v", err)
+	}
+	releaseFailurePost()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old chat handler did not finish")
+	}
+	if names := env.gitlab.awardedOn(11, 306); !slices.Equal(names, []string{"white_check_mark"}) {
+		t.Fatalf("redelivery acknowledgement after old handler finished = %v, want preserved", names)
+	}
+}
+
 // A reply in a thread nickpit did not start is never answered, so it must not
 // be decorated either.
 func TestHandlerChatForeignThreadGetsNoQuestionMark(t *testing.T) {
