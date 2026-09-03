@@ -237,7 +237,8 @@ serve:
   # "eyes" awarded at review start; "" disables. Must differ from triggerEmoji.
   startEmoji: "eyes"
   commandKeyword: "nickpit"
-  # Reaction awarded on a /nickpit review command note. "eyes" = on it; "" disables.
+  # Reaction awarded on a /nickpit review command note, and on a discussion
+  # question while the chat agent answers it. "eyes" = on it; "" disables both.
   ackEmoji: "eyes"
   # Reaction awarded on a /nickpit abort command note. "stop_button"; "" disables.
   abortEmoji: "stop_button"

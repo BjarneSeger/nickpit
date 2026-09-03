@@ -48,6 +48,11 @@ type fakeGitLab struct {
 	discussionRoot string
 	// discussionReply is the live triggering user note returned after the root.
 	discussionReply string
+	// discussionRootAuthorID overrides the author id of the root note a
+	// discussion GET returns (0 keeps the default 5). Tests that need the bot
+	// to own the thread set it to fakeBotUserID, the id the fake stamps on the
+	// daemon's own awards, so gate and own-award filter agree.
+	discussionRootAuthorID int
 	// failDiscussionGET makes the chat thread gate's discussion GET fail with a
 	// 429, exercising the unconfirmed-gate paths. discussionGETs counts the
 	// gate's read attempts.
@@ -94,6 +99,11 @@ type fakeGitLab struct {
 	emojiPostGate    chan struct{}
 	emojiPostArrived atomic.Int32
 	emojiPostGated   atomic.Bool
+	// discussionPostGate holds a discussion reply before the fake records it.
+	// Chat tests use it to inspect acknowledgement state while a terminal
+	// failure reply is in flight.
+	discussionPostGate    chan struct{}
+	discussionPostArrived atomic.Int32
 }
 
 func (f *fakeGitLab) gateReads() int {
@@ -126,6 +136,10 @@ type recordedAward struct {
 
 func (f *fakeGitLab) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.discussionPostGate != nil && r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/discussions/") {
+			f.discussionPostArrived.Add(1)
+			<-f.discussionPostGate
+		}
 		if f.emojiPostGate != nil && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/award_emoji") && f.emojiPostGated.CompareAndSwap(false, true) {
 			f.emojiPostArrived.Add(1)
 			<-f.emojiPostGate
@@ -256,8 +270,12 @@ func (f *fakeGitLab) handler() http.Handler {
 				w.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
+			rootAuthorID := f.discussionRootAuthorID
+			if rootAuthorID == 0 {
+				rootAuthorID = 5
+			}
 			notes := []map[string]any{
-				{"id": 900, "body": f.discussionRoot, "system": false, "author": map[string]any{"id": 5, "username": "someone"}},
+				{"id": 900, "body": f.discussionRoot, "system": false, "author": map[string]any{"id": rootAuthorID, "username": "someone"}},
 			}
 			if f.discussionReply != "" {
 				notes = append(notes, map[string]any{"id": 306, "body": f.discussionReply, "system": false, "author": map[string]any{"id": 9, "username": "reviewer"}})

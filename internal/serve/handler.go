@@ -70,10 +70,19 @@ const defaultChatRetryDelay = 15 * time.Second
 // re-trigger anything.
 const chatFailureText = "⚠️ I could not answer this question — the attempts failed or timed out. Please ask again in a new reply."
 
+// chatAckReleaseTimeout bounds taking the in-progress chat reaction back off a
+// question note. That happens after the event's own deadline — and at shutdown
+// after the chat lifecycle context was already cancelled — so it runs on its
+// own budget, kept short so it cannot hold the shutdown drain open. The
+// reaction is cosmetic, and the next chat turn on the same note clears one a
+// failed release stranded.
+const chatAckReleaseTimeout = 10 * time.Second
+
 // HandlerConfig is the static trigger configuration for the webhook endpoint.
-// The review ack emoji is NOT configured here: the handler reads it from the
+// The ack emoji is NOT configured here: the handler reads it from the
 // dispatcher (Dispatcher.AckEmoji), whose workers revoke it at settle time —
-// one source, so award and revoke can never disagree on the name.
+// one source, so award and revoke can never disagree on the name. The same
+// emoji marks a question the discussion agent is answering (see awardChatAck).
 type HandlerConfig struct {
 	// TriggerEmoji is the award-emoji name requesting a manual review.
 	TriggerEmoji string
@@ -667,7 +676,22 @@ func (h *Handler) handleChat(group *Group, projectPath string, projectID int, de
 	// (a read-scoped 429) while posts would succeed, the thread may be anyone's.
 	gatePassed := false
 	dedupMarked := false
+	// acked records that the question note wears the in-progress reaction. It
+	// comes off when the event is over, whatever the outcome — a stranded one
+	// would keep promising an answer that is no longer coming.
+	acked := false
+	releaseAck := func() {
+		if acked {
+			h.releaseChatAck(group, projectID, decision)
+			acked = false
+		}
+	}
+	defer releaseAck()
 	abandon := func() {
+		// Settle this event's reaction before making its dedup key available.
+		// Otherwise a redelivery can reuse the existing same-name award and this
+		// handler's deferred cleanup will revoke the successor's acknowledgement.
+		releaseAck()
 		if dedupMarked {
 			h.chatSeen.forget(decision.NoteID)
 		}
@@ -683,7 +707,7 @@ func (h *Handler) handleChat(group *Group, projectPath string, projectID int, de
 		}
 	}
 	for attempt := 1; ; attempt++ {
-		retryable, gateConfirmed := h.chatAttempt(ctx, group, projectPath, decision, &dedupMarked)
+		retryable, gateConfirmed := h.chatAttempt(ctx, group, projectPath, projectID, decision, &dedupMarked, &acked)
 		gatePassed = gatePassed || gateConfirmed
 		if !retryable {
 			return
@@ -699,6 +723,7 @@ func (h *Handler) handleChat(group *Group, projectPath string, projectID int, de
 			// confirmed ours. The failure note marks the thread answered, so
 			// re-asking (as the note says) is the recovery, never a surprise
 			// double-answer.
+			releaseAck()
 			if dedupMarked {
 				h.chatSeen.forget(decision.NoteID)
 			}
@@ -770,7 +795,7 @@ func (h *Handler) replyChatFailureIfAllowed(group *Group, projectPath string, pr
 // spawn failures, and other non-zero child exits are retryable. ctx is the
 // admitted event's shared deadline (see handleChat) — every blocking step here
 // runs under it.
-func (h *Handler) chatAttempt(ctx context.Context, group *Group, projectPath string, decision Decision, dedupMarked *bool) (retryable, gateConfirmed bool) {
+func (h *Handler) chatAttempt(ctx context.Context, group *Group, projectPath string, projectID int, decision Decision, dedupMarked, acked *bool) (retryable, gateConfirmed bool) {
 	// Serialize replies within a discussion BEFORE competing for a global slot.
 	// The reverse order would let queued replies to one busy discussion each sit
 	// on a global slot while blocked on that discussion's lock, starving chats
@@ -834,6 +859,12 @@ func (h *Handler) chatAttempt(ctx context.Context, group *Group, projectPath str
 		}
 		*dedupMarked = true
 	}
+	// Tell the author the question was picked up, now that the thread is
+	// confirmed nickpit's own and policy admits the note. Retries reuse the
+	// first attempt's award rather than requesting it again.
+	if !*acked {
+		*acked = h.awardChatAck(ctx, group, projectID, decision)
+	}
 
 	exitCode, logPath, err := h.chatRunner.RunChat(ctx, ChatSpec{
 		ProjectPath:    projectPath,
@@ -858,6 +889,10 @@ func (h *Handler) chatAttempt(ctx context.Context, group *Group, projectPath str
 		// Policy changed after the parent gate admitted the event. Retrying while
 		// muted would waste work, but retaining the mark would suppress a later
 		// explicit request on this note after the thread is unmuted.
+		if *acked {
+			h.releaseChatAck(group, projectID, decision)
+			*acked = false
+		}
 		if *dedupMarked {
 			h.chatSeen.forget(decision.NoteID)
 			*dedupMarked = false
@@ -924,6 +959,54 @@ func (h *Handler) ackNote(ctx context.Context, group *Group, projectID int, deci
 		return err
 	}
 	return nil
+}
+
+// chatAckEmoji is the reaction marking a question the discussion agent is
+// working on. It is the review ack emoji, read from the dispatcher for the
+// same reason handleCommand reads it there: one source, so award and revoke
+// can never disagree on the name. "" (ack_emoji disabled) marks nothing.
+func (h *Handler) chatAckEmoji() string {
+	if h.dispatcher == nil {
+		return ""
+	}
+	return h.dispatcher.AckEmoji()
+}
+
+// awardChatAck marks the question note as picked up while its answer is being
+// produced, and reports whether releaseChatAck must sweep the note afterwards.
+// A FAILED award still needs that sweep: a client-side timeout does not prove
+// GitLab dropped the award, and a duplicate award is accepted silently, so the
+// revoke-by-name pass is the only thing that can tell.
+func (h *Handler) awardChatAck(ctx context.Context, group *Group, projectID int, decision Decision) bool {
+	emoji := h.chatAckEmoji()
+	if emoji == "" || decision.NoteID == 0 || group.BotUserID == 0 {
+		return false
+	}
+	if err := group.Client.AwardNoteEmoji(ctx, projectID, decision.IID, decision.NoteID, emoji); err != nil {
+		h.log.Warn("marking chat question as picked up failed", "iid", decision.IID, "note", decision.NoteID, "emoji", emoji, "error", err)
+	}
+	return true
+}
+
+// releaseChatAck takes the in-progress reaction back off a question note once
+// its event is over: the answer (or a failure note) is posted, the thread
+// turned out to be muted, or every attempt failed. It runs on its own deadline
+// because the event's context is normally done by then — a finished child, an
+// exhausted budget, or a cancelled chat lifecycle at shutdown — and the
+// reaction must come off regardless. The revoke-only replacement deletes just
+// this bot's own award of that name, so a human's identical reaction survives,
+// and being idempotent it also clears an award an earlier failed release left
+// behind.
+func (h *Handler) releaseChatAck(group *Group, projectID int, decision Decision) {
+	emoji := h.chatAckEmoji()
+	if emoji == "" || decision.NoteID == 0 || group.BotUserID == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatAckReleaseTimeout)
+	defer cancel()
+	if err := group.Client.ReplaceNoteEmoji(ctx, projectID, decision.IID, decision.NoteID, group.BotUserID, "", emoji); err != nil {
+		h.log.Warn("clearing chat question reaction failed", "iid", decision.IID, "note", decision.NoteID, "emoji", emoji, "error", err)
+	}
 }
 
 // reply answers a command, threaded under its note when the payload carried a

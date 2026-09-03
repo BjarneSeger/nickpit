@@ -784,6 +784,138 @@ func TestHandlerChatNoFailureNoteWithoutGateConfirmation(t *testing.T) {
 	}
 }
 
+// A question the daemon is going to answer wears the ack emoji until its
+// answer is posted, so the author can see it was picked up.
+func TestHandlerChatMarksQuestionUntilAnswered(t *testing.T) {
+	env := newHandlerEnv(t)
+	// The bot owns the thread root AND the awards the fake stamps, so the
+	// thread gate and the revoke's own-award filter agree on one id.
+	env.group.BotUserID = fakeBotUserID
+	env.gitlab.discussionRootAuthorID = fakeBotUserID
+	env.gitlab.discussionRoot = reviewFindingBody(model.Finding{ID: "f1", Title: "Bug"})
+	answering := make(chan struct{})
+	release := make(chan struct{})
+	env.handler.chatRunner = chatRunnerFunc(func(context.Context, ChatSpec) (int, string, error) {
+		close(answering)
+		<-release
+		return 0, "chat.log", nil
+	})
+
+	postWebhook(t, env.handler, "note_plain.json", "legacy-secret")
+	select {
+	case <-answering:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat child was not spawned")
+	}
+	if names := env.gitlab.awardedOn(11, 306); !slices.Contains(names, "white_check_mark") {
+		t.Fatalf("awards on the question note = %v, want the ack emoji while the answer is produced", names)
+	}
+	close(release)
+	// The answer is posted, so the in-progress reaction comes back off.
+	waitFor(t, 2*time.Second, func() bool {
+		return !slices.Contains(env.gitlab.awardedOn(11, 306), "white_check_mark")
+	})
+	if names := env.gitlab.revokedNames(); !slices.Contains(names, "white_check_mark") {
+		t.Fatalf("revoked = %v, want the ack emoji taken back", names)
+	}
+}
+
+// A question that stays unanswered after every retry must not keep the
+// reaction: it would promise an answer that is no longer coming.
+func TestHandlerChatReleasesQuestionMarkAfterExhaustedRetries(t *testing.T) {
+	env := newHandlerEnv(t)
+	env.handler.chatRetryDelay = time.Millisecond
+	env.group.BotUserID = fakeBotUserID
+	env.gitlab.discussionRootAuthorID = fakeBotUserID
+	env.gitlab.discussionRoot = reviewFindingBody(model.Finding{ID: "f1"})
+	env.chat.exitCodes = []int{1} // every attempt fails (last value repeats)
+
+	postWebhook(t, env.handler, "note_plain.json", "legacy-secret")
+	waitFor(t, 2*time.Second, func() bool {
+		for _, post := range env.gitlab.posted() {
+			if strings.Contains(post.Body["body"], "could not answer") {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		return !slices.Contains(env.gitlab.awardedOn(11, 306), "white_check_mark")
+	})
+	// One award for the whole event: retries reuse the first attempt's.
+	awards := 0
+	for _, name := range env.gitlab.awardPosted() {
+		if name == "white_check_mark" {
+			awards++
+		}
+	}
+	if awards != 1 {
+		t.Fatalf("ack emoji awarded %d times, want once for the whole event", awards)
+	}
+}
+
+// An exhausted event must release its acknowledgement before admitting a
+// redelivery. GitLab keeps only one bot-owned award of a given name, so stale
+// deferred cleanup would otherwise revoke the newer event's reused award.
+func TestHandlerChatReleasesQuestionMarkBeforeAdmittingRedelivery(t *testing.T) {
+	env := newHandlerEnv(t)
+	env.handler.chatRetryDelay = time.Millisecond
+	env.group.BotUserID = fakeBotUserID
+	env.gitlab.discussionRootAuthorID = fakeBotUserID
+	env.gitlab.discussionRoot = reviewFindingBody(model.Finding{ID: "f1"})
+	env.gitlab.discussionPostGate = make(chan struct{})
+	var releasePost sync.Once
+	releaseFailurePost := func() { releasePost.Do(func() { close(env.gitlab.discussionPostGate) }) }
+	t.Cleanup(releaseFailurePost)
+	env.chat.exitCodes = []int{1}
+	decision := Decision{IID: 11, DiscussionID: "disc-306", NoteID: 306}
+
+	done := make(chan struct{})
+	go func() {
+		env.handler.handleChat(env.group, "platform/legacy/tool", 43, decision)
+		close(done)
+	}()
+	waitFor(t, 2*time.Second, func() bool { return env.gitlab.discussionPostArrived.Load() > 0 })
+
+	if !env.handler.chatSeen.markNew(decision.NoteID) {
+		t.Fatal("redelivery not admitted while terminal failure reply is in flight")
+	}
+	if names := env.gitlab.awardedOn(11, 306); len(names) != 0 {
+		t.Fatalf("old acknowledgement still live when redelivery admitted: %v", names)
+	}
+	if err := env.group.Client.AwardNoteEmoji(context.Background(), 43, 11, 306, "white_check_mark"); err != nil {
+		t.Fatalf("award redelivery acknowledgement: %v", err)
+	}
+	releaseFailurePost()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old chat handler did not finish")
+	}
+	if names := env.gitlab.awardedOn(11, 306); !slices.Equal(names, []string{"white_check_mark"}) {
+		t.Fatalf("redelivery acknowledgement after old handler finished = %v, want preserved", names)
+	}
+}
+
+// A reply in a thread nickpit did not start is never answered, so it must not
+// be decorated either.
+func TestHandlerChatForeignThreadGetsNoQuestionMark(t *testing.T) {
+	env := newHandlerEnv(t)
+	env.group.BotUserID = fakeBotUserID
+	env.gitlab.discussionRoot = "just a human thread"
+
+	postWebhook(t, env.handler, "note_plain.json", "legacy-secret")
+	waitFor(t, 2*time.Second, func() bool { return env.gitlab.gateReads() > 0 })
+	select {
+	case <-env.chat.calls:
+		t.Fatal("chat child spawned for a foreign thread")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if names := env.gitlab.awardPosted(); len(names) != 0 {
+		t.Fatalf("awarded %v on a foreign thread, want nothing", names)
+	}
+}
+
 // With chat disabled (nil runner), a thread reply is ignored, not spawned.
 func TestHandlerChatDisabled(t *testing.T) {
 	env := newHandlerEnv(t)
