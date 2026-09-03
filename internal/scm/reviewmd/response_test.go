@@ -11,7 +11,7 @@ func TestResponseFooterUpsertAndStrip(t *testing.T) {
 		Enabled: true, MuteEmoji: "mute", RequestEmoji: "nickpit", CommandKeyword: "nickpit",
 	}
 	withFooter := UpsertResponseFooter(body, status)
-	if !strings.Contains(withFooter, "NickPit will respond") || !strings.Contains(withFooter, ":mute:") || !strings.Contains(withFooter, "/nickpit mute") {
+	if !strings.Contains(withFooter, "NickPit responds to comments") || !strings.Contains(withFooter, ":mute:") || !strings.Contains(withFooter, "/nickpit mute") {
 		t.Fatalf("footer = %q", withFooter)
 	}
 	if got := StripMarkers(withFooter); got != "visible review" {
@@ -30,7 +30,7 @@ func TestResponseFooterPersistsCommandMute(t *testing.T) {
 	}
 	status.CommandMuted = false
 	resumed := UpsertResponseFooter(body, status)
-	if ThreadCommandMuted(resumed) || !strings.Contains(resumed, "will respond") {
+	if ThreadCommandMuted(resumed) || !strings.Contains(resumed, "NickPit responds to comments") {
 		t.Fatalf("resumed footer = %q", resumed)
 	}
 }
@@ -39,14 +39,14 @@ func TestResponseFooterOptInAndBlockers(t *testing.T) {
 	optIn := UpsertResponseFooter("review", ResponseStatus{
 		Enabled: true, OptIn: true, MuteEmoji: "mute", RequestEmoji: "nickpit", CommandKeyword: "nickpit",
 	})
-	if !strings.Contains(optIn, "only when requested") || !strings.Contains(optIn, ":nickpit:") {
+	if !strings.Contains(optIn, "NickPit responds if you add `/nickpit respond` to your comment") || !strings.Contains(optIn, ":nickpit:") {
 		t.Fatalf("opt-in footer = %q", optIn)
 	}
 	blocked := UpsertResponseFooter("review", ResponseStatus{
 		Enabled: true, MRMuted: true, ThreadMuted: true, CommandMuted: true,
 		MuteEmoji: "mute", CommandKeyword: "nickpit",
 	})
-	for _, want := range []string{"merge request", "this post", "/nickpit resume"} {
+	for _, want := range []string{"NickPit is muted.", "remove :mute: from MR", "remove :mute: from thread", "/nickpit resume"} {
 		if !strings.Contains(blocked, want) {
 			t.Fatalf("blocked footer missing %q: %s", want, blocked)
 		}
@@ -77,6 +77,7 @@ func TestResponseFooterTracksPolicyChanges(t *testing.T) {
 		"renamed mute":    {Enabled: true, OptIn: true, MuteEmoji: "no_bell", RequestEmoji: "nickpit", CommandKeyword: "nickpit"},
 		"renamed request": {Enabled: true, OptIn: true, MuteEmoji: "mute", RequestEmoji: "robot", CommandKeyword: "nickpit"},
 		"renamed keyword": {Enabled: true, OptIn: true, MuteEmoji: "mute", RequestEmoji: "nickpit", CommandKeyword: "bot"},
+		"pull requests":   {Enabled: true, OptIn: true, MuteEmoji: "mute", RequestEmoji: "nickpit", CommandKeyword: "nickpit", RequestTerm: "PR"},
 	} {
 		if FooterMatchesPolicy(body, changed) {
 			t.Fatalf("%s did not change the policy fingerprint", name)
@@ -84,5 +85,39 @@ func TestResponseFooterTracksPolicyChanges(t *testing.T) {
 	}
 	if got := StripResponseFooter(body); got != "Finding body" {
 		t.Fatalf("policy marker survived stripping: %q", got)
+	}
+}
+
+// Chat switched off renders no visible footer at all — but the hidden markers
+// must still be stamped, or every reconcile pass would re-read reactions for
+// roots it can never bring up to date.
+func TestResponseFooterDisabledRendersMarkersOnly(t *testing.T) {
+	policy := ResponseStatus{MuteEmoji: "mute", CommandKeyword: "nickpit"}
+	body := UpsertResponseFooter("Finding body", policy)
+	if !HasResponseFooter(body) || !FooterMatchesPolicy(body, policy) {
+		t.Fatalf("disabled footer lost its markers: %q", body)
+	}
+	if strings.Contains(body, "NickPit") || strings.Contains(body, "---") {
+		t.Fatalf("disabled footer rendered visible text: %q", body)
+	}
+	if got := StripMarkers(body); got != "Finding body" {
+		t.Fatalf("StripMarkers = %q", got)
+	}
+}
+
+// The platform's own word for the change under review rides in the footer, so
+// a GitHub reader is never told to react on a "merge request".
+func TestResponseFooterUsesPlatformRequestTerm(t *testing.T) {
+	status := ResponseStatus{Enabled: true, MuteEmoji: "mute", CommandKeyword: "nickpit", RequestTerm: "PR"}
+	body := UpsertResponseFooter("review", status)
+	if !strings.Contains(body, "react with :mute: on thread or PR") {
+		t.Fatalf("PR footer = %q", body)
+	}
+	status.MRMuted = true
+	if muted := UpsertResponseFooter("review", status); !strings.Contains(muted, "remove :mute: from PR") {
+		t.Fatalf("muted PR footer = %q", muted)
+	}
+	if dflt := UpsertResponseFooter("review", ResponseStatus{Enabled: true, MuteEmoji: "mute"}); !strings.Contains(dflt, "on thread or MR") {
+		t.Fatalf("default term footer = %q", dflt)
 	}
 }

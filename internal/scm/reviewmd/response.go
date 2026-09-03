@@ -27,6 +27,9 @@ type ResponseStatus struct {
 	MuteEmoji      string
 	RequestEmoji   string
 	CommandKeyword string
+	// RequestTerm is the platform's word for the change under review: "MR" on
+	// GitLab, "PR" on GitHub. Empty defaults to "MR".
+	RequestTerm string
 }
 
 // ThreadCommandMuted reports whether a review root carries the bot-controlled
@@ -53,6 +56,7 @@ func (s ResponseStatus) PolicyFingerprint() string {
 		s.MuteEmoji,
 		s.RequestEmoji,
 		s.CommandKeyword,
+		s.requestTerm(),
 	}, "\x00")))
 	return hex.EncodeToString(sum[:8])
 }
@@ -64,6 +68,15 @@ func (s ResponseStatus) PolicyFingerprint() string {
 // roots must re-stamp those.
 func FooterMatchesPolicy(body string, status ResponseStatus) bool {
 	return strings.Contains(body, responsePolicyMarker(status.PolicyFingerprint()))
+}
+
+// requestTerm is the platform's word for the change under review, defaulted so
+// an unset field and an explicit "MR" fingerprint — and read — identically.
+func (s ResponseStatus) requestTerm() string {
+	if term := Sanitize(strings.TrimSpace(s.RequestTerm)); term != "" {
+		return term
+	}
+	return "MR"
 }
 
 func responsePolicyMarker(fingerprint string) string {
@@ -105,9 +118,14 @@ func UpsertResponseFooter(body string, status ResponseStatus) string {
 		b.WriteString(responseCommandMuted)
 		b.WriteString("\n")
 	}
-	b.WriteString("---\n\n*")
-	b.WriteString(responseStatusText(status))
-	b.WriteString("*\n")
+	// Disabled chat renders no visible footer at all, but the hidden markers
+	// stay: they carry the persistent command-mute state and the policy
+	// fingerprint that lets SyncNewRoots skip already-reconciled roots.
+	if text := responseStatusText(status); text != "" {
+		b.WriteString("---\n\n*")
+		b.WriteString(text)
+		b.WriteString("*\n")
+	}
 	b.WriteString(responseFooterEnd)
 	return b.String()
 }
@@ -120,38 +138,39 @@ func responseStatusText(status ResponseStatus) string {
 	command := func(alias string) string { return fmt.Sprintf("`/%s %s`", keyword, alias) }
 	muteEmoji := Sanitize(strings.TrimSpace(status.MuteEmoji))
 	requestEmoji := Sanitize(strings.TrimSpace(status.RequestEmoji))
+	requestTerm := status.requestTerm()
 
 	if !status.Enabled {
-		return "NickPit will not respond to comments; responses are disabled by server configuration."
+		return ""
 	}
 
 	var blockers []string
 	if status.MRMuted {
-		blockers = append(blockers, fmt.Sprintf("remove :%s: from the merge request", muteEmoji))
+		blockers = append(blockers, fmt.Sprintf("remove :%s: from %s", muteEmoji, requestTerm))
 	}
 	if status.ThreadMuted {
-		blockers = append(blockers, fmt.Sprintf("remove :%s: from this post", muteEmoji))
+		blockers = append(blockers, fmt.Sprintf("remove :%s: from thread", muteEmoji))
 	}
 	if status.CommandMuted {
-		blockers = append(blockers, "post "+command("resume")+" on its own line")
+		blockers = append(blockers, "add "+command("resume")+" to your comment")
 	}
 	if len(blockers) > 0 {
-		return "NickPit will not respond to comments. To re-enable responses, " + strings.Join(blockers, "; ") + "."
+		return "NickPit is muted. To unmute, " + strings.Join(blockers, "; ") + "."
 	}
 
 	var muteInstructions []string
 	if muteEmoji != "" {
 		muteInstructions = append(muteInstructions,
-			fmt.Sprintf("react with :%s: on this post to mute this thread or on the merge request to mute all NickPit threads", muteEmoji))
+			fmt.Sprintf("react with :%s: on thread or %s", muteEmoji, requestTerm))
 	}
-	muteInstructions = append(muteInstructions, "post "+command("mute")+" on its own line")
+	muteInstructions = append(muteInstructions, "add "+command("mute")+" to your comment")
 	muteText := strings.Join(muteInstructions, ", or ")
 	if status.OptIn {
-		request := "include " + command("respond") + " on its own line in the question"
+		request := "NickPit responds if you add " + command("respond") + " to your comment"
 		if requestEmoji != "" {
-			request += fmt.Sprintf(" or react with :%s: on the question comment", requestEmoji)
+			request += fmt.Sprintf(" or react with :%s:", requestEmoji)
 		}
-		return "NickPit responds only when requested: " + request + ". To mute responses, " + muteText + "."
+		return request + ". To mute, " + muteText + "."
 	}
-	return "NickPit will respond to comments. To mute responses, " + muteText + "."
+	return "NickPit responds to comments. To mute, " + muteText + "."
 }

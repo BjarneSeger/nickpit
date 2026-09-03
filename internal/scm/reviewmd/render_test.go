@@ -191,7 +191,7 @@ func TestFindingBodyPrefixAndMarker(t *testing.T) {
 	wantPrefix := marker + "\n\n" +
 		"![P1](https://host/p1.svg)\n\n" +
 		"`file.go:5`  \n\n" +
-		"### Title  \n\n" +
+		"#### Title  \n\n" +
 		"Detail  "
 	if !strings.HasPrefix(body, wantPrefix) {
 		t.Fatalf("finding body order = %q, want prefix %q", body, wantPrefix)
@@ -202,11 +202,14 @@ func TestFindingBodyPrefixAndMarker(t *testing.T) {
 	if len(priors) != 1 || priors[0].ID != "f1" || priors[0].CodeLocation.FilePath != "file.go" || priors[0].Title != "Title" {
 		t.Fatalf("fingerprint did not round-trip from body: %+v", priors)
 	}
-	if !strings.Contains(body, "`file.go:5`") || !strings.Contains(body, "### Title") || !strings.Contains(body, "- do x") {
+	if !strings.Contains(body, "`file.go:5`") || !strings.Contains(body, "#### Title") || !strings.Contains(body, "- do x") {
 		t.Fatalf("finding body missing prefix/title/suggestion: %q", body)
 	}
-	if !strings.Contains(body, "\n\n**Suggestions**  \n\n- do x  ") {
-		t.Fatalf("finding suggestions missing hard breaks: %q", body)
+	if !strings.Contains(body, "\n\n<details>\n<summary>Suggestions</summary>\n\n- do x  ") {
+		t.Fatalf("finding suggestions missing details block/hard breaks: %q", body)
+	}
+	if !strings.HasSuffix(body, "\n\n</details>") {
+		t.Fatalf("finding suggestions details block not closed: %q", body)
 	}
 }
 
@@ -412,7 +415,7 @@ func TestFindingBodyOmitsCarrierWhenOversized(t *testing.T) {
 	}
 	// The visible publication must survive: fingerprint, title, and body intact,
 	// with the full payload replaced by a tiny routing-only reference.
-	if !strings.HasPrefix(body, FingerprintPrefix) || !strings.Contains(body, "### Huge") {
+	if !strings.HasPrefix(body, FingerprintPrefix) || !strings.Contains(body, "#### Huge") {
 		t.Fatalf("visible body degraded: %.120q", body)
 	}
 	envs := CollectFindingEnvelopes(body)
