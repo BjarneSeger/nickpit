@@ -571,7 +571,7 @@ func TestHandlerChatDeniedPolicyStillSyncsResponseFooter(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	waitFor(t, 2*time.Second, func() bool {
-		return strings.Contains(env.gitlab.discussionBody(), "responds only when requested")
+		return strings.Contains(env.gitlab.discussionBody(), "NickPit responds if you add `/nickpit respond` on its own line to your comment")
 	})
 }
 
@@ -816,9 +816,12 @@ func TestHandlerChatDisabledStillSyncsResponseFooter(t *testing.T) {
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "ignored") {
 		t.Fatalf("code=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	// Chat off renders no visible footer text, so the reconcile shows up only as
+	// the stamped hidden markers on the root.
 	waitFor(t, 2*time.Second, func() bool {
 		for _, post := range env.gitlab.posted() {
-			if strings.Contains(post.Body["body"], "disabled by server configuration") {
+			body := post.Body["body"]
+			if reviewmd.HasResponseFooter(body) && !strings.Contains(body, "NickPit") {
 				return true
 			}
 		}

@@ -81,7 +81,7 @@ func TestResponseControllerCombinesReactionsCommandsAndFooter(t *testing.T) {
 	persisted := rootBody
 	noteAwards = []map[string]any{}
 	mu.Unlock()
-	if !reviewmd.ThreadCommandMuted(persisted) || !strings.Contains(persisted, "will not respond") {
+	if !reviewmd.ThreadCommandMuted(persisted) || !strings.Contains(persisted, "NickPit is muted.") {
 		t.Fatalf("persisted body lacks mute state/footer: %q", persisted)
 	}
 
@@ -89,7 +89,7 @@ func TestResponseControllerCombinesReactionsCommandsAndFooter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.Allows(false) || reviewmd.ThreadCommandMuted(state.Root.Body) || !strings.Contains(state.Root.Body, "will respond") {
+	if !state.Allows(false) || reviewmd.ThreadCommandMuted(state.Root.Body) || !strings.Contains(state.Root.Body, "NickPit responds to comments") {
 		t.Fatalf("resume did not restore automatic response mode: %+v body=%q", state.Status, state.Root.Body)
 	}
 }

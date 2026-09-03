@@ -59,6 +59,7 @@ func (c *ResponseController) policyStatus() reviewmd.ResponseStatus {
 		MuteEmoji:      c.cfg.MuteEmoji,
 		RequestEmoji:   c.cfg.RequestEmoji,
 		CommandKeyword: c.cfg.CommandKeyword,
+		RequestTerm:    "MR",
 	}
 }
 

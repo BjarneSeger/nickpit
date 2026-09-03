@@ -1073,20 +1073,26 @@ func (r Renderer) FindingBodyCarried(finding model.Finding, locationPrefix strin
 		b.WriteString("  \n\n")
 	}
 	if title != "" {
-		fmt.Fprintf(&b, "### %s  \n\n", Sanitize(title))
+		fmt.Fprintf(&b, "#### %s  \n\n", Sanitize(title))
 	}
 	b.WriteString(sanitizeWithHardBreaks(body))
-	suggestions := FindingDisplaySuggestions(finding)
-	if len(suggestions) > 0 {
-		b.WriteString("\n\n**Suggestions**  \n")
-		for _, suggestion := range suggestions {
-			text := strings.TrimSpace(suggestion.Body)
-			if text == "" {
-				continue
-			}
-			formatted := strings.ReplaceAll(sanitizeWithHardBreaks(text), "\n", "\n  ")
-			fmt.Fprintf(&b, "\n- %s", formatted)
+	// Suggestions ride in a collapsed <details> block so a long list does not
+	// bury the finding itself. The blank lines around the item list are load
+	// bearing: without them GitLab/GitHub render the markdown inside the HTML
+	// block as literal text.
+	var suggestionItems strings.Builder
+	for _, suggestion := range FindingDisplaySuggestions(finding) {
+		text := strings.TrimSpace(suggestion.Body)
+		if text == "" {
+			continue
 		}
+		formatted := strings.ReplaceAll(sanitizeWithHardBreaks(text), "\n", "\n  ")
+		fmt.Fprintf(&suggestionItems, "\n- %s", formatted)
+	}
+	if suggestionItems.Len() > 0 {
+		b.WriteString("\n\n<details>\n<summary>Suggestions</summary>\n")
+		b.WriteString(suggestionItems.String())
+		b.WriteString("\n\n</details>")
 	}
 	visible := b.String()
 	carrier := FindingMarker(r.reviewID, finding)
