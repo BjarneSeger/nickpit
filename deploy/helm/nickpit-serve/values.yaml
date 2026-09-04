@@ -93,7 +93,7 @@ resources:
     memory: 512Mi
   limits:
     cpu: "2"
-    memory: 2Gi
+    memory: 4Gi
 
 # Ephemeral scratch volumes (root fs is read-only). work holds git clones +
 # per-review logs; tmp and home cover git's incidental writes (including the
