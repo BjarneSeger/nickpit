@@ -92,6 +92,16 @@ func rustGraphCached(repoRoot string, hierScope lookupScope) (*staticGraph, erro
 	})
 }
 
+// unparsedInScope implements unparsedScopeReporter. The graph for this scope is
+// the one the failed lookup just built, so this is a cache read.
+func (rustBackend) unparsedInScope(repoRoot string, scope lookupScope) map[string]string {
+	graph, err := rustGraphCached(repoRoot, scopeForHierarchy(scope))
+	if err != nil {
+		return nil
+	}
+	return graph.unparsedInScope(scope)
+}
+
 func buildRustGraph(repoRoot string, scope lookupScope) (*staticGraph, error) {
 	files, err := collectFilesByExt(repoRoot, scope, rustSupportedExts)
 	if err != nil {

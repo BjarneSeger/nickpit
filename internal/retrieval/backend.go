@@ -185,21 +185,16 @@ func resolveSymbol(ctx context.Context, repoRoot string, symbol SymbolRef) (*res
 	}
 
 	if len(matches) == 0 {
+		// A file the retrieval layer declined to parse holds no symbols for a
+		// budget reason, which is not evidence the symbol is absent. This is
+		// the only place that can say so for a lookup which found nothing:
+		// resolution fails here, before any call-graph traversal that carries
+		// its own note.
+		note := parenthesized(unparsedNote(unparsedScopeReasons(repoRoot, scope, backends)))
 		if scope.Path != "" {
-			// A file the retrieval layer declined to parse holds no symbols for
-			// a budget reason, which is not evidence the symbol is absent. Only
-			// a file scope is checked: naming the file costs one cached lookup,
-			// while a directory scope would have to re-read every file in it —
-			// there the note comes from the call graph instead.
-			note := ""
-			if scope.IsFile {
-				if reason := unparsedFileReason(repoRoot, scope.Path); reason != "" {
-					note = fmt.Sprintf(" (%s was left unparsed: %s — use a literal search instead)", scope.Path, reason)
-				}
-			}
 			return nil, fmt.Errorf("symbol %q not found in %q%s", symbol.Name, scope.Path, note)
 		}
-		return nil, fmt.Errorf("symbol %q not found", symbol.Name)
+		return nil, fmt.Errorf("symbol %q not found%s", symbol.Name, note)
 	}
 
 	sort.Slice(matches, func(i, j int) bool {
@@ -214,6 +209,42 @@ func resolveSymbol(ctx context.Context, repoRoot string, symbol SymbolRef) (*res
 		return left.Path < right.Path
 	})
 	return &matches[0], nil
+}
+
+// unparsedScopeReporter is implemented by backends that can name the files in
+// a scope no parser ran over. Only the tree-sitter backends implement it,
+// because only their parser declines a file outright; the Go and esbuild
+// parsers either analyze a file or fail the whole lookup.
+type unparsedScopeReporter interface {
+	unparsedInScope(repoRoot string, scope lookupScope) map[string]string
+}
+
+// unparsedScopeReasons collects the unparsed files in scope, keyed by path.
+// A file scope resolves through the parse cache, which the failed lookup has
+// already populated. A directory or repository scope asks the backends, whose
+// call graph for that scope is likewise already cached — re-reading every file
+// in the scope to answer an error message would not be worth it.
+func unparsedScopeReasons(repoRoot string, scope lookupScope, backends []languageBackend) map[string]string {
+	if scope.IsFile {
+		if reason := unparsedFileReason(repoRoot, scope.Path); reason != "" {
+			return map[string]string{scope.Path: reason}
+		}
+		return nil
+	}
+	var out map[string]string
+	for _, backend := range backends {
+		reporter, ok := backend.(unparsedScopeReporter)
+		if !ok {
+			continue
+		}
+		for path, reason := range reporter.unparsedInScope(repoRoot, scope) {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[path] = reason
+		}
+	}
+	return out
 }
 
 type goBackend struct{}

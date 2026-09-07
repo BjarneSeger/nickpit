@@ -89,10 +89,68 @@ func TestFileIRCacheEvictsLeastRecentlyUsed(t *testing.T) {
 		capFallback: 2,
 	}
 	for i := range 5 {
-		cache.entry(fmt.Sprintf("f%d.py", i))
+		entry := cache.entry(fmt.Sprintf("f%d.py", i))
+		entry.parsed.Store(true) // a finished parse, so the entry is evictable
 	}
 	if len(cache.entries) != 2 {
 		t.Fatalf("cache holds %d entries, want 2", len(cache.entries))
+	}
+}
+
+// Evicting an in-flight parse would let the next caller for the same bytes
+// start a second one alongside it — the concurrent duplicate this cache exists
+// to prevent. Cap pressure must therefore leave unfinished entries alone.
+func TestFileIRCacheKeepsInFlightEntriesUnderCapPressure(t *testing.T) {
+	t.Setenv("NICKPIT_IR_CACHE_MAX_ENTRIES", "2")
+	cache := referenceCacheStore[fileIRCacheEntry]{
+		capEnv:      "NICKPIT_IR_CACHE_MAX_ENTRIES",
+		capFallback: 2,
+	}
+	inFlight := cache.entry("in-flight.py") // never marked parsed
+	for i := range 5 {
+		entry := cache.entry(fmt.Sprintf("f%d.py", i))
+		entry.parsed.Store(true)
+	}
+	if got := cache.entry("in-flight.py"); got != inFlight {
+		t.Fatal("in-flight entry was evicted, so a second concurrent parse of the same file is possible")
+	}
+	inFlight.parsed.Store(true)
+	cache.entry("after.py")
+	if _, ok := cache.entries["in-flight.py"]; ok && len(cache.entries) > 2 {
+		t.Fatalf("finished entry stayed pinned: cache holds %d entries", len(cache.entries))
+	}
+}
+
+// The store must not spin when every entry is still being built: it holds more
+// than the cap for that moment instead.
+func TestFileIRCacheHoldsMoreThanCapWhileEverythingIsInFlight(t *testing.T) {
+	t.Setenv("NICKPIT_IR_CACHE_MAX_ENTRIES", "2")
+	cache := referenceCacheStore[fileIRCacheEntry]{
+		capEnv:      "NICKPIT_IR_CACHE_MAX_ENTRIES",
+		capFallback: 2,
+	}
+	for i := range 5 {
+		cache.entry(fmt.Sprintf("f%d.py", i))
+	}
+	if len(cache.entries) != 5 {
+		t.Fatalf("cache holds %d entries, want all 5 in-flight entries retained", len(cache.entries))
+	}
+}
+
+// A panicking parse must not leave its entry pinned forever: sync.Once counts
+// the call as done, so the entry would answer every later caller with an empty
+// result and never leave the cache.
+func TestParseFileIRReleasesEntryAfterPanic(t *testing.T) {
+	entry := fileIRCache.entry("panic-probe.py")
+	func() {
+		defer func() { _ = recover() }()
+		entry.once.Do(func() {
+			defer entry.parsed.Store(true)
+			panic("parser exploded")
+		})
+	}()
+	if entry.retainInCache() {
+		t.Fatal("entry stayed pinned after a panicking parse")
 	}
 }
 
@@ -167,5 +225,79 @@ func TestFindCallersOnSizeSkippedFileExplainsTheSkip(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "literal search") {
 		t.Fatalf("error %q does not point at the fallback", err)
+	}
+}
+
+// A directory- or repository-scoped lookup whose declaration lives only in a
+// size-skipped file must still disclose the skip. Resolution fails before any
+// call-graph traversal, so the note has to come from the resolver itself.
+func TestFindCallersOnDirectoryScopeExplainsUnparsedFiles(t *testing.T) {
+	repoRoot := t.TempDir()
+	var b strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&b, "def handler_%d(payload):\n    return {\"a\": payload[\"u\"]}\n\n", i)
+	}
+	writeRetrievalFile(t, repoRoot, "pkg/bot.py", b.String())
+	writeRetrievalFile(t, repoRoot, "pkg/small.py", "def helper(x):\n    return x\n")
+	t.Setenv("NICKPIT_MAX_STRUCTURAL_PARSE_BYTES", "64")
+
+	for _, scope := range []string{"pkg", ""} {
+		engine := NewLocalEngine()
+		_, err := engine.FindCallers(context.Background(), repoRoot, SymbolRef{Name: "handler_7", Path: scope}, 1)
+		if err == nil {
+			t.Fatalf("scope %q: expected a lookup failure", scope)
+		}
+		if !strings.Contains(err.Error(), "unparsed") || !strings.Contains(err.Error(), "pkg/bot.py") {
+			t.Fatalf("scope %q: error %q does not name the unparsed file", scope, err)
+		}
+		if !strings.Contains(err.Error(), "literal search") {
+			t.Fatalf("scope %q: error %q does not point at the fallback", scope, err)
+		}
+	}
+}
+
+// A parser runtime failure and a size skip need different actions from whoever
+// reads the note, so the recorded reason must survive rather than every file
+// being reported as oversize.
+func TestUnparsedNoteKeepsEachRecordedReason(t *testing.T) {
+	note := unparsedNote(map[string]string{
+		"big.py":    "source exceeds the tree-sitter parse size cap: 99 bytes exceeds the 64 byte cap",
+		"broken.py": "parser runtime failed: grammar unavailable",
+	})
+	if !strings.Contains(note, "exceeds the tree-sitter parse size cap") {
+		t.Fatalf("note %q lost the size-cap reason", note)
+	}
+	if !strings.Contains(note, "parser runtime failed") {
+		t.Fatalf("note %q reported a parser failure as a size skip", note)
+	}
+	if !strings.Contains(note, "2 file(s)") {
+		t.Fatalf("note %q does not count the files", note)
+	}
+}
+
+func TestUnparsedNoteNamesASingleFileDirectly(t *testing.T) {
+	note := unparsedNote(map[string]string{"bot.py": "parser returned no tree"})
+	if !strings.Contains(note, "bot.py was left unparsed (parser returned no tree)") {
+		t.Fatalf("note %q does not read as one file's skip", note)
+	}
+}
+
+func TestUnparsedNoteBoundsTheFileListing(t *testing.T) {
+	reasons := map[string]string{}
+	for i := range 12 {
+		reasons[fmt.Sprintf("f%d.py", i)] = "source exceeds the tree-sitter parse size cap"
+	}
+	note := unparsedNote(reasons)
+	if strings.Count(note, ".py") > maxListedUnparsedFiles {
+		t.Fatalf("note lists more than %d files: %q", maxListedUnparsedFiles, note)
+	}
+	if !strings.Contains(note, "and 7 more") {
+		t.Fatalf("note %q does not account for the files it left out", note)
+	}
+}
+
+func TestUnparsedNoteEmptyWhenEverythingParsed(t *testing.T) {
+	if note := unparsedNote(nil); note != "" {
+		t.Fatalf("note = %q, want empty", note)
 	}
 }

@@ -93,6 +93,16 @@ func (pythonBackend) findCallees(_ context.Context, repoRoot string, symbol *Sym
 	return graph.find(symbol.Name, symbol.Path, depth, false)
 }
 
+// unparsedInScope implements unparsedScopeReporter. The graph for this scope is
+// the one the failed lookup just built, so this is a cache read.
+func (pythonBackend) unparsedInScope(repoRoot string, scope lookupScope) map[string]string {
+	graph, err := pythonGraphCached(repoRoot, scopeForHierarchy(scope))
+	if err != nil {
+		return nil
+	}
+	return graph.unparsedInScope(scope)
+}
+
 func pythonGraphCached(repoRoot string, hierScope lookupScope) (*staticGraph, error) {
 	return buildStaticGraphCached("python", repoRoot, hierScope, func() (*staticGraph, error) {
 		return buildPythonGraph(repoRoot, hierScope)

@@ -58,28 +58,32 @@ func (g *staticGraph) markUnparsed(path, reason string) {
 }
 
 // unparsedNote describes the unparsed files a failed lookup in path should
-// mention: the file itself when it is one of them, otherwise the scope's count.
-// It returns "" when everything in scope was parsed.
+// mention: the file itself when it is one of them, otherwise everything
+// unparsed in the graph's scope. It returns "" when everything was parsed.
 func (g *staticGraph) unparsedNote(path string) string {
 	if len(g.unparsed) == 0 {
 		return ""
 	}
 	if reason, ok := g.unparsed[path]; ok && path != "" {
-		return fmt.Sprintf(": %s was left unparsed (%s), so its definitions are missing from this analysis — use a literal search instead", path, reason)
+		return unparsedNote(map[string]string{path: reason})
 	}
-	paths := make([]string, 0, len(g.unparsed))
-	for unparsedPath := range g.unparsed {
-		paths = append(paths, unparsedPath)
+	return unparsedNote(g.unparsed)
+}
+
+// unparsedInScope returns the unparsed files this graph holds that fall inside
+// scope. The graph is built for the hierarchy scope, which widens a file lookup
+// to the whole repository, so a narrower lookup filters it back down.
+func (g *staticGraph) unparsedInScope(scope lookupScope) map[string]string {
+	if len(g.unparsed) == 0 {
+		return nil
 	}
-	sort.Strings(paths)
-	listed := paths
-	suffix := ""
-	if len(listed) > maxListedUnparsedFiles {
-		listed = listed[:maxListedUnparsedFiles]
-		suffix = fmt.Sprintf(" and %d more", len(paths)-maxListedUnparsedFiles)
+	out := map[string]string{}
+	for path, reason := range g.unparsed {
+		if pathInLookupScope(path, scope) {
+			out[path] = reason
+		}
 	}
-	return fmt.Sprintf(": %d file(s) in scope were left unparsed (%s%s), so a definition there is missing from this analysis — use a literal search instead",
-		len(paths), strings.Join(listed, ", "), suffix)
+	return out
 }
 
 type staticGraphCacheEntry struct {
@@ -210,9 +214,9 @@ func (g *staticGraph) find(name, path string, depth int, reverse bool) (*CallHie
 	_, ok := g.nodes[key]
 	if !ok {
 		if path != "" {
-			return nil, fmt.Errorf("symbol %q not found in %q%s", name, path, g.unparsedNote(path))
+			return nil, fmt.Errorf("symbol %q not found in %q%s", name, path, parenthesized(g.unparsedNote(path)))
 		}
-		return nil, fmt.Errorf("symbol %q not found%s", name, g.unparsedNote(""))
+		return nil, fmt.Errorf("symbol %q not found%s", name, parenthesized(g.unparsedNote("")))
 	}
 	if g.lowConfidence[key] {
 		return nil, &LowConfidenceError{language: g.language}

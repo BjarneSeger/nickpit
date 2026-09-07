@@ -394,6 +394,18 @@ type parsedReferenceCacheEntry struct {
 
 var parsedReferenceCache referenceCacheStore[parsedReferenceCacheEntry] // absolute repo root -> entry
 
+// cacheRetainer lets a cached value refuse eviction while it is still being
+// built. Without it, eviction under cap pressure can drop an entry whose work
+// is in flight; the next caller for the same key finds nothing, creates a
+// second entry and starts the same work again — concurrently. For a cache whose
+// purpose is to keep one expensive build from running twice at once that is the
+// opposite of the intent, so a value that implements this interface stays put
+// until it reports itself retainable.
+type cacheRetainer interface {
+	// retainInCache reports that this value must not be evicted yet.
+	retainInCache() bool
+}
+
 // referenceCacheStore memoizes one expensive per-repository artifact — parsed
 // sources or type-checked Go packages — keyed by absolute repository root. Both
 // artifacts retain the whole repository, so the daemon, which reviews a new
@@ -441,7 +453,9 @@ func (c *referenceCacheStore[T]) entry(key string) *T {
 // evictLocked drops least-recently-used roots until the cache fits its cap.
 // The cap counts roots per cache, so the parsed and Go snapshots each keep up
 // to that many. NICKPIT_REFERENCE_CACHE_MAX_ENTRIES tunes it; a value <= 0
-// disables eviction.
+// disables eviction. Values that report themselves retainable (see
+// cacheRetainer) are skipped, so the cache can briefly hold more than the cap
+// when everything in it is still being built rather than duplicating that work.
 func (c *referenceCacheStore[T]) evictLocked() {
 	capEnv, capFallback := c.capEnv, c.capFallback
 	if capEnv == "" {
@@ -454,9 +468,17 @@ func (c *referenceCacheStore[T]) evictLocked() {
 	for len(c.entries) > limit {
 		oldestKey, oldest := "", uint64(0)
 		for key, slot := range c.entries {
+			if retainer, ok := any(slot.value).(cacheRetainer); ok && retainer.retainInCache() {
+				continue
+			}
 			if oldestKey == "" || slot.lastUsed < oldest {
 				oldestKey, oldest = key, slot.lastUsed
 			}
+		}
+		if oldestKey == "" {
+			// Everything left is still being built; evicting none of it is the
+			// only choice that does not duplicate work.
+			return
 		}
 		delete(c.entries, oldestKey)
 	}
@@ -472,14 +494,14 @@ func resolveParsedDefinition(symbol SymbolRef, scope lookupScope, parsed []*pars
 	// The declaration patterns depend only on the language and the symbol, so
 	// they are compiled once per language rather than once per file.
 	patterns := map[string]declarationPatterns{}
-	var unparsed []string
+	unparsed := map[string]string{}
 	for _, file := range parsed {
 		if !pathInLookupScope(file.path, scope) {
 			continue
 		}
 		analyzed++
 		if file.unparsedReason != "" {
-			unparsed = append(unparsed, file.path)
+			unparsed[file.path] = file.unparsedReason
 		}
 		compiled, ok := patterns[file.language]
 		if !ok {
@@ -497,7 +519,7 @@ func resolveParsedDefinition(symbol SymbolRef, scope lookupScope, parsed []*pars
 		// A file nobody parsed cannot support a claim of absence, so the reason
 		// travels with the error and reaches the model as part of the
 		// literal-search note.
-		return definitionCandidate{}, &SymbolNotFoundError{Name: symbol.Name, Path: scope.Path, Reason: unparsedScopeReason(unparsed)}
+		return definitionCandidate{}, &SymbolNotFoundError{Name: symbol.Name, Path: scope.Path, Reason: unparsedNote(unparsed)}
 	}
 	candidates = dedupeDefinitionCandidates(candidates)
 	// An import binds a name declared somewhere else, so it is a usage kind,
@@ -714,29 +736,6 @@ func parseReferenceFile(repoRoot, path, source string) *parsedReferenceFile {
 	}
 	return file
 }
-
-// unparsedScopeReason describes the files a lookup could not analyze
-// structurally, for SymbolNotFoundError.Reason. It returns "" when every file
-// in the scope was parsed, which keeps the error message unchanged for the
-// common case.
-func unparsedScopeReason(paths []string) string {
-	if len(paths) == 0 {
-		return ""
-	}
-	sort.Strings(paths)
-	listed := paths
-	suffix := ""
-	if len(listed) > maxListedUnparsedFiles {
-		listed = listed[:maxListedUnparsedFiles]
-		suffix = fmt.Sprintf(" and %d more", len(paths)-maxListedUnparsedFiles)
-	}
-	return fmt.Sprintf("%d file(s) in scope were left unparsed because they exceed the structural parse size cap (%s%s), so a declaration there would be invisible to this analysis",
-		len(paths), strings.Join(listed, ", "), suffix)
-}
-
-// maxListedUnparsedFiles bounds how many paths the reason names, so a
-// repository of large files cannot turn one tool result into a file listing.
-const maxListedUnparsedFiles = 5
 
 func pathInLookupScope(path string, scope lookupScope) bool {
 	if scope.Path == "" {
