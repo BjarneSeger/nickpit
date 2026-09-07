@@ -34,6 +34,32 @@ const (
 	MaxAmbiguousReferenceTargets = 10
 	MaxRetrievedFileBytes        = 5 << 20
 
+	// MaxTreeSitterParseBytes caps the source one tree-sitter parse may see.
+	// The pure-Go runtime (gotreesitter, used for Python and Rust) allocates
+	// ~0.45 MB of heap per KB of source, linearly: a measured 1 MB Python file
+	// peaks at 439 MB and takes 1.8 s, so 1 MiB bounds one parse at roughly
+	// half a GB. That is well above every realistic source file — a repository
+	// this size is an outlier at the 99th percentile — while still refusing
+	// the multi-MB inputs MaxRetrievedFileBytes would otherwise admit, which
+	// scale straight into the gigabytes and can take the whole process with
+	// them. Above the cap the file is left unparsed and callers degrade to
+	// literal search rather than claiming a symbol is absent.
+	// NICKPIT_MAX_STRUCTURAL_PARSE_BYTES tunes it, a value <= 0 disables the
+	// cap (the pre-cap behavior).
+	//
+	// The numbers above are gotreesitter v0.52. Up to v0.21 the same parse
+	// cost 5-10 MB per KB and grew superlinearly (a 229 KB file peaked at
+	// 1.8 GB over 20 s, and ~840 MB of it survived an explicit GC inside the
+	// library's parser pool), which is what made the review daemon OOM.
+	MaxTreeSitterParseBytes = 1 << 20
+
+	// DefaultFileIRCacheEntries bounds how many parsed files the IR cache
+	// keeps. One entry retains a file's symbols including their source text,
+	// so this is sized to hold a normal repository's parse results (tens of
+	// MB) rather than a monorepo's. Eviction only costs a re-parse.
+	// NICKPIT_IR_CACHE_MAX_ENTRIES tunes it; a value <= 0 disables eviction.
+	DefaultFileIRCacheEntries = 1024
+
 	// DefaultStaticGraphCacheEntries bounds how many distinct (language,
 	// repoRoot, scope) call graphs one run memoizes.
 	DefaultStaticGraphCacheEntries = 64

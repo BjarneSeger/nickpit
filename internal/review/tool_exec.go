@@ -197,15 +197,19 @@ func (e *Engine) executeFindReferences(ctx context.Context, repoRoot string, too
 	if err != nil {
 		var (
 			unsupported *retrieval.UnsupportedLanguageError
+			skipped     *retrieval.StructuralAnalysisSkippedError
 			notFound    *retrieval.SymbolNotFoundError
 		)
-		// Both degrade to a literal search, but they mean different things and
-		// the model must not be told the file type is unsupported when the
-		// analysis ran and simply found no declaration.
+		// All three degrade to a literal search, but they mean different things
+		// and the model must not be told the file type is unsupported when the
+		// analysis ran and simply found no declaration, nor that a symbol is
+		// absent when the files that would hold it were never parsed.
 		note := ""
 		switch {
 		case errors.As(err, &unsupported):
 			note = "structural reference analysis is unavailable for this file type; showing case-sensitive literal matches instead"
+		case errors.As(err, &skipped):
+			note = "structural reference analysis is unavailable here: " + skipped.Reason + "; showing case-sensitive literal matches instead"
 		case errors.As(err, &notFound):
 			note = "structural analysis found no declaration of this symbol; showing case-sensitive literal matches instead, which may be empty or defined in a file type without a structural backend"
 			if notFound.Reason != "" {
@@ -1197,7 +1201,19 @@ func (e *Engine) executeCallHierarchy(ctx context.Context, repoRoot string, tool
 		// backends) so callers/uses in other files are still surfaced.
 		var unsupported *retrieval.UnsupportedLanguageError
 		if errors.As(err, &unsupported) {
-			return e.callHierarchySearchFallback(ctx, repoRoot, toolCall.ID, normalizedPath, args.Symbol, callers, key, state)
+			return e.callHierarchySearchFallback(ctx, repoRoot, toolCall.ID, normalizedPath, args.Symbol, callers, key, state,
+				"structural call hierarchy is unavailable for this file type; showing literal search matches for the symbol instead")
+		}
+
+		// Files left unparsed for a budget reason are the same situation from
+		// the model's side: the hierarchy cannot be built, but the code is
+		// probably there. Answering with literal matches in this turn saves the
+		// round trip that telling the model to search itself would cost, and
+		// keeps a deliberate skip from being reported as retrieval_failed.
+		var skipped *retrieval.StructuralAnalysisSkippedError
+		if errors.As(err, &skipped) {
+			return e.callHierarchySearchFallback(ctx, repoRoot, toolCall.ID, normalizedPath, args.Symbol, callers, key, state,
+				"structural call hierarchy is unavailable here: "+skipped.Reason+"; showing literal search matches for the symbol instead")
 		}
 
 		// Low confidence indicates the analysis ran but has uncertain results due to
@@ -1219,13 +1235,17 @@ func (e *Engine) executeCallHierarchy(ctx context.Context, repoRoot string, tool
 // repo-wide search so callers/uses in other files are still found. The symbol is a
 // plain identifier, so the regex-metachar handling that executeSearch performs is not
 // needed here.
-func (e *Engine) callHierarchySearchFallback(ctx context.Context, repoRoot, toolCallID, normalizedPath, symbol string, callers bool, key string, state *toolRoundState) string {
+// callHierarchySearchFallback answers a hierarchy lookup with literal matches.
+// note explains to the model why the result is literal; every caller has a
+// different cause and the model needs the specific one to decide what to do
+// next, so it is not derived here.
+func (e *Engine) callHierarchySearchFallback(ctx context.Context, repoRoot, toolCallID, normalizedPath, symbol string, callers bool, key string, state *toolRoundState, note string) string {
 	mode := "callees"
 	if callers {
 		mode = "callers"
 	}
 	searchScope := retrieval.FallbackSearchScope(repoRoot, normalizedPath)
-	e.logf(ctx, "Falling back to literal search for unsupported call hierarchy: mode=%s path=%s symbol=%q search_scope=%q", mode, normalizedPath, symbol, searchScope)
+	e.logf(ctx, "Falling back to literal search for call hierarchy: mode=%s path=%s symbol=%q search_scope=%q reason=%q", mode, normalizedPath, symbol, searchScope, note)
 	results, err := e.retrieval.Search(ctx, repoRoot, searchScope, symbol, toollimits.DefaultSearchContextLines, toollimits.MaxFallbackSearchResults, false)
 	if err != nil {
 		return toolError(normalizedPath, "retrieval_failed", err.Error())
@@ -1236,7 +1256,7 @@ func (e *Engine) callHierarchySearchFallback(ctx context.Context, repoRoot, tool
 		"path":         normalizedPath,
 		"mode":         mode,
 		"fallback":     "search",
-		"note":         "structural call hierarchy is unavailable for this file type; showing literal search matches for the symbol instead",
+		"note":         note,
 		"query":        results.Query,
 		"result_count": results.ResultCount,
 		"results":      results.Results,

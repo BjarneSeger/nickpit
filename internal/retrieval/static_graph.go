@@ -31,6 +31,10 @@ type staticGraph struct {
 	byPathName    map[string][]string
 	byName        map[string][]string
 	lowConfidence map[string]bool
+	// unparsed lists the repo-relative paths in this graph's scope that no
+	// parser ran over, so a symbol missing from the graph is not reported as
+	// evidence of absence. See tsparser.FileIR.Unparsed.
+	unparsed map[string]string
 }
 
 func newStaticGraph(language, repoRoot string) *staticGraph {
@@ -43,7 +47,43 @@ func newStaticGraph(language, repoRoot string) *staticGraph {
 		byPathName:    map[string][]string{},
 		byName:        map[string][]string{},
 		lowConfidence: map[string]bool{},
+		unparsed:      map[string]string{},
 	}
+}
+
+// markUnparsed records that path contributed no definitions because it was
+// never parsed.
+func (g *staticGraph) markUnparsed(path, reason string) {
+	g.unparsed[path] = reason
+}
+
+// unparsedNote describes the unparsed files a failed lookup in path should
+// mention: the file itself when it is one of them, otherwise everything
+// unparsed in the graph's scope. It returns "" when everything was parsed.
+func (g *staticGraph) unparsedNote(path string) string {
+	if len(g.unparsed) == 0 {
+		return ""
+	}
+	if reason, ok := g.unparsed[path]; ok && path != "" {
+		return unparsedNote(map[string]string{path: reason})
+	}
+	return unparsedNote(g.unparsed)
+}
+
+// unparsedInScope returns the unparsed files this graph holds that fall inside
+// scope. The graph is built for the hierarchy scope, which widens a file lookup
+// to the whole repository, so a narrower lookup filters it back down.
+func (g *staticGraph) unparsedInScope(scope lookupScope) map[string]string {
+	if len(g.unparsed) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for path, reason := range g.unparsed {
+		if pathInLookupScope(path, scope) {
+			out[path] = reason
+		}
+	}
+	return out
 }
 
 type staticGraphCacheEntry struct {
@@ -173,6 +213,12 @@ func (g *staticGraph) find(name, path string, depth int, reverse bool) (*CallHie
 	}
 	_, ok := g.nodes[key]
 	if !ok {
+		// Same rule as in resolveSymbol: unparsed files in the graph's scope
+		// make this a skipped analysis, not an absent symbol, and the typed
+		// error routes it to the literal-search fallback.
+		if reason := g.unparsedNote(path); reason != "" {
+			return nil, &StructuralAnalysisSkippedError{Name: name, Path: path, Reason: reason}
+		}
 		if path != "" {
 			return nil, fmt.Errorf("symbol %q not found in %q", name, path)
 		}

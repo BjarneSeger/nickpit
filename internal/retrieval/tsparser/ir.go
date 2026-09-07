@@ -95,4 +95,10 @@ type FileIR struct {
 	Exports []Export
 	// HasError reports that the file contained parse errors anywhere.
 	HasError bool
+	// Unparsed reports that no parser ran over the file at all, so Symbols,
+	// Imports and Exports are empty for a budget reason rather than because
+	// the file holds nothing. UnparsedReason says why. Callers must degrade to
+	// literal inspection and must never report the emptiness as absence.
+	Unparsed       bool
+	UnparsedReason string
 }

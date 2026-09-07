@@ -29,8 +29,11 @@ type rustSymbol struct {
 }
 
 type rustFile struct {
-	path    string
-	symbols map[string]*rustSymbol
+	path string
+	// unparsedReason is set when no parser ran over the file; see
+	// tsparser.FileIR.Unparsed.
+	unparsedReason string
+	symbols        map[string]*rustSymbol
 	// byName maps function name -> symbol ids (declaration order); nested
 	// functions are kept out so same-file resolution matches addressable
 	// definitions.
@@ -89,6 +92,16 @@ func rustGraphCached(repoRoot string, hierScope lookupScope) (*staticGraph, erro
 	})
 }
 
+// unparsedInScope implements unparsedScopeReporter. The graph for this scope is
+// the one the failed lookup just built, so this is a cache read.
+func (rustBackend) unparsedInScope(repoRoot string, scope lookupScope) map[string]string {
+	graph, err := rustGraphCached(repoRoot, scopeForHierarchy(scope))
+	if err != nil {
+		return nil
+	}
+	return graph.unparsedInScope(scope)
+}
+
 func buildRustGraph(repoRoot string, scope lookupScope) (*staticGraph, error) {
 	files, err := collectFilesByExt(repoRoot, scope, rustSupportedExts)
 	if err != nil {
@@ -105,6 +118,11 @@ func buildRustGraph(repoRoot string, scope lookupScope) (*staticGraph, error) {
 		}
 	}
 	graph := newStaticGraph("rust", repoRoot)
+	for rel, module := range modules {
+		if module.unparsedReason != "" {
+			graph.markUnparsed(rel, module.unparsedReason)
+		}
+	}
 	for _, module := range modules {
 		for _, symbol := range module.symbols {
 			graph.addNode(symbol.id, staticNode{
@@ -144,9 +162,10 @@ func parseRustFiles(repoRoot string, files []string) (map[string]*rustFile, erro
 	modules := make(map[string]*rustFile, len(irs))
 	for rel, ir := range irs {
 		module := &rustFile{
-			path:    rel,
-			symbols: map[string]*rustSymbol{},
-			byName:  map[string][]string{},
+			path:           rel,
+			unparsedReason: ir.UnparsedReason,
+			symbols:        map[string]*rustSymbol{},
+			byName:         map[string][]string{},
 		}
 		for _, irSymbol := range ir.Symbols {
 			symbol := &rustSymbol{

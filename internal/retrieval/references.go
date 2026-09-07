@@ -367,6 +367,12 @@ type parsedReferenceFile struct {
 	// spec — including the ones that resolve to nothing — is recorded once per
 	// parsed snapshot rather than re-stat'd per binding.
 	resolvedImports map[string]string
+	// unparsedReason is set when no parser ran over the file (currently: it
+	// exceeds the tree-sitter parse cap), so a lookup that finds nothing here
+	// can say why instead of reporting the symbol as absent. The masked-source
+	// patterns still run, so such a file is not invisible — only its structural
+	// bindings are missing.
+	unparsedReason string
 }
 
 type parsedFunction struct {
@@ -388,6 +394,18 @@ type parsedReferenceCacheEntry struct {
 
 var parsedReferenceCache referenceCacheStore[parsedReferenceCacheEntry] // absolute repo root -> entry
 
+// cacheRetainer lets a cached value refuse eviction while it is still being
+// built. Without it, eviction under cap pressure can drop an entry whose work
+// is in flight; the next caller for the same key finds nothing, creates a
+// second entry and starts the same work again — concurrently. For a cache whose
+// purpose is to keep one expensive build from running twice at once that is the
+// opposite of the intent, so a value that implements this interface stays put
+// until it reports itself retainable.
+type cacheRetainer interface {
+	// retainInCache reports that this value must not be evicted yet.
+	retainInCache() bool
+}
+
 // referenceCacheStore memoizes one expensive per-repository artifact — parsed
 // sources or type-checked Go packages — keyed by absolute repository root. Both
 // artifacts retain the whole repository, so the daemon, which reviews a new
@@ -395,7 +413,14 @@ var parsedReferenceCache referenceCacheStore[parsedReferenceCacheEntry] // absol
 // the process. Least-recently-used roots are dropped once the cap is exceeded;
 // an evicted entry stays alive for whoever still holds it and is simply rebuilt
 // on the next lookup, so eviction can never produce a wrong answer.
+// The zero value caps entries with NICKPIT_REFERENCE_CACHE_MAX_ENTRIES /
+// toollimits.DefaultReferenceCacheEntries; a store keyed by something other
+// than a repository root sets capEnv and capFallback to its own knob so the
+// per-repository cap cannot bound an unrelated cache.
 type referenceCacheStore[T any] struct {
+	capEnv      string
+	capFallback int
+
 	mu      sync.Mutex
 	entries map[string]*referenceCacheSlot[T]
 	clock   uint64
@@ -428,21 +453,47 @@ func (c *referenceCacheStore[T]) entry(key string) *T {
 // evictLocked drops least-recently-used roots until the cache fits its cap.
 // The cap counts roots per cache, so the parsed and Go snapshots each keep up
 // to that many. NICKPIT_REFERENCE_CACHE_MAX_ENTRIES tunes it; a value <= 0
-// disables eviction.
+// disables eviction. Values that report themselves retainable (see
+// cacheRetainer) are skipped, so the cache can briefly hold more than the cap
+// when everything in it is still being built rather than duplicating that work.
 func (c *referenceCacheStore[T]) evictLocked() {
-	limit := cacheCapFromEnv("NICKPIT_REFERENCE_CACHE_MAX_ENTRIES", toollimits.DefaultReferenceCacheEntries)
+	capEnv, capFallback := c.capEnv, c.capFallback
+	if capEnv == "" {
+		capEnv, capFallback = "NICKPIT_REFERENCE_CACHE_MAX_ENTRIES", toollimits.DefaultReferenceCacheEntries
+	}
+	limit := cacheCapFromEnv(capEnv, capFallback)
 	if limit <= 0 {
 		return
 	}
 	for len(c.entries) > limit {
 		oldestKey, oldest := "", uint64(0)
 		for key, slot := range c.entries {
+			if retainer, ok := any(slot.value).(cacheRetainer); ok && retainer.retainInCache() {
+				continue
+			}
 			if oldestKey == "" || slot.lastUsed < oldest {
 				oldestKey, oldest = key, slot.lastUsed
 			}
 		}
+		if oldestKey == "" {
+			// Everything left is still being built; evicting none of it is the
+			// only choice that does not duplicate work.
+			return
+		}
 		delete(c.entries, oldestKey)
 	}
+}
+
+// compact re-runs eviction against the current retainability of every entry.
+// entry() can only drop what is evictable at insertion time, so a burst of
+// concurrent first-time builds — each one retained while it runs — leaves the
+// cache over its cap once they finish. Whoever finishes a build calls this;
+// without it the cache stays over cap until the next miss, and a run whose
+// remaining lookups all hit would never come back under it.
+func (c *referenceCacheStore[T]) compact() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictLocked()
 }
 
 // resolveParsedDefinition picks the single declaration of symbol inside scope.
@@ -455,11 +506,15 @@ func resolveParsedDefinition(symbol SymbolRef, scope lookupScope, parsed []*pars
 	// The declaration patterns depend only on the language and the symbol, so
 	// they are compiled once per language rather than once per file.
 	patterns := map[string]declarationPatterns{}
+	unparsed := map[string]string{}
 	for _, file := range parsed {
 		if !pathInLookupScope(file.path, scope) {
 			continue
 		}
 		analyzed++
+		if file.unparsedReason != "" {
+			unparsed[file.path] = file.unparsedReason
+		}
 		compiled, ok := patterns[file.language]
 		if !ok {
 			compiled = compileDeclarationPatterns(file.language, symbol.Name)
@@ -473,7 +528,10 @@ func resolveParsedDefinition(symbol SymbolRef, scope lookupScope, parsed []*pars
 			// backend, so its absence says nothing about the symbol.
 			return definitionCandidate{}, &UnsupportedLanguageError{Path: scope.Path}
 		}
-		return definitionCandidate{}, &SymbolNotFoundError{Name: symbol.Name, Path: scope.Path}
+		// A file nobody parsed cannot support a claim of absence, so the reason
+		// travels with the error and reaches the model as part of the
+		// literal-search note.
+		return definitionCandidate{}, &SymbolNotFoundError{Name: symbol.Name, Path: scope.Path, Reason: unparsedNote(unparsed)}
 	}
 	candidates = dedupeDefinitionCandidates(candidates)
 	// An import binds a name declared somewhere else, so it is a usage kind,
@@ -667,7 +725,8 @@ func parseReferenceFile(repoRoot, path, source string) *parsedReferenceFile {
 		path: path, language: language,
 		masked: maskReferenceSource(lines, language),
 	}
-	if ir, err := tsparser.ParseFile(path, []byte(source)); err == nil {
+	if ir, err := parseFileIR(path, []byte(source)); err == nil {
+		file.unparsedReason = ir.UnparsedReason
 		file.imports = append(file.imports, ir.Imports...)
 		file.exports = append(file.exports, ir.Exports...)
 		for _, symbol := range ir.Symbols {

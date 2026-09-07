@@ -17,7 +17,7 @@ func parseRust(path string, src []byte) (*FileIR, error) {
 	ir := &FileIR{Path: path}
 	bt, err := tsParse("x.rs", src)
 	if err != nil || bt == nil {
-		ir.HasError = true
+		markUnparsed(ir, err)
 		return ir, nil
 	}
 	defer bt.Release()

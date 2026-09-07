@@ -11,9 +11,10 @@ func parsePython(path string, src []byte) (*FileIR, error) {
 	ir := &FileIR{Path: path}
 	bt, err := tsParse("x.py", src)
 	if err != nil || bt == nil {
-		// The runtime failed outright (tree-sitter itself is error-tolerant);
-		// degrade to "no structural information" rather than failing the file.
-		ir.HasError = true
+		// The runtime failed outright (tree-sitter itself is error-tolerant),
+		// or the file is too large to parse within the memory budget; degrade
+		// to "no structural information" rather than failing the file.
+		markUnparsed(ir, err)
 		return ir, nil
 	}
 	defer bt.Release()

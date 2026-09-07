@@ -45,6 +45,10 @@ type pythonFile struct {
 	// byName lists symbol ids per name in declaration order, including nested
 	// definitions (used as a same-file fallback for bare-call resolution).
 	byName map[string][]string
+	// unparsedReason is set when no parser ran over the file, so the graph can
+	// tell a lookup that the file's definitions are missing for a budget
+	// reason rather than absent. See tsparser.FileIR.Unparsed.
+	unparsedReason string
 }
 
 var pythonSupportedExts = map[string]struct{}{".py": {}}
@@ -89,6 +93,16 @@ func (pythonBackend) findCallees(_ context.Context, repoRoot string, symbol *Sym
 	return graph.find(symbol.Name, symbol.Path, depth, false)
 }
 
+// unparsedInScope implements unparsedScopeReporter. The graph for this scope is
+// the one the failed lookup just built, so this is a cache read.
+func (pythonBackend) unparsedInScope(repoRoot string, scope lookupScope) map[string]string {
+	graph, err := pythonGraphCached(repoRoot, scopeForHierarchy(scope))
+	if err != nil {
+		return nil
+	}
+	return graph.unparsedInScope(scope)
+}
+
 func pythonGraphCached(repoRoot string, hierScope lookupScope) (*staticGraph, error) {
 	return buildStaticGraphCached("python", repoRoot, hierScope, func() (*staticGraph, error) {
 		return buildPythonGraph(repoRoot, hierScope)
@@ -105,6 +119,11 @@ func buildPythonGraph(repoRoot string, scope lookupScope) (*staticGraph, error) 
 		return nil, err
 	}
 	graph := newStaticGraph("python", repoRoot)
+	for rel, module := range modules {
+		if module.unparsedReason != "" {
+			graph.markUnparsed(rel, module.unparsedReason)
+		}
+	}
 	for _, module := range modules {
 		for _, symbol := range module.symbols {
 			graph.addNode(symbol.id, staticNode{
@@ -160,12 +179,13 @@ func parsePythonFiles(repoRoot string, files []string) (map[string]*pythonFile, 
 	modules := make(map[string]*pythonFile, len(irs))
 	for rel, ir := range irs {
 		module := &pythonFile{
-			path:        rel,
-			imports:     map[string]pythonImportBinding{},
-			topLevel:    map[string]string{},
-			classMethod: map[string]map[string]string{},
-			symbols:     map[string]*pythonSymbol{},
-			byName:      map[string][]string{},
+			path:           rel,
+			imports:        map[string]pythonImportBinding{},
+			topLevel:       map[string]string{},
+			classMethod:    map[string]map[string]string{},
+			symbols:        map[string]*pythonSymbol{},
+			byName:         map[string][]string{},
+			unparsedReason: ir.UnparsedReason,
 		}
 		for _, irSymbol := range ir.Symbols {
 			symbol := &pythonSymbol{

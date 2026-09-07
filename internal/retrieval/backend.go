@@ -65,6 +65,33 @@ func (e *GoAnalysisSkippedError) Error() string {
 	return fmt.Sprintf("resolving %q needs the Go type-check snapshot, which this lookup avoids building", e.Name)
 }
 
+// StructuralAnalysisSkippedError reports that the files which would have
+// answered the lookup were never parsed — currently because they exceed the
+// tree-sitter parse cap. Like UnsupportedLanguageError it says nothing about
+// whether the symbol exists, so callers must degrade to a literal search
+// instead of reporting absence; unlike it, the cause is a budget decision on
+// specific files rather than a language nobody can analyze, and Reason names
+// them. It is deliberately a distinct type from SymbolNotFoundError: that one
+// means the analysis ran and came up empty, which is a claim this one cannot
+// make.
+type StructuralAnalysisSkippedError struct {
+	Name string
+	Path string
+	// Reason lists the unparsed files and why each was skipped.
+	Reason string
+}
+
+func (e *StructuralAnalysisSkippedError) Error() string {
+	message := fmt.Sprintf("structural analysis cannot answer %q", e.Name)
+	if e.Path != "" {
+		message = fmt.Sprintf("structural analysis cannot answer %q in %q", e.Name, e.Path)
+	}
+	if e.Reason != "" {
+		return message + ": " + e.Reason
+	}
+	return message
+}
+
 // SymbolNotFoundError reports that structural analysis ran over the scope and
 // found no declaration of the symbol. It is distinct from
 // UnsupportedLanguageError: the analysis was possible and simply came up empty,
@@ -185,6 +212,16 @@ func resolveSymbol(ctx context.Context, repoRoot string, symbol SymbolRef) (*res
 	}
 
 	if len(matches) == 0 {
+		// A file the retrieval layer declined to parse holds no symbols for a
+		// budget reason, which is not evidence the symbol is absent. This is
+		// the only place that can say so for a lookup which found nothing:
+		// resolution fails here, before any call-graph traversal that carries
+		// its own note. The typed error is what lets the tool layer answer with
+		// literal matches in the same turn instead of handing the model an
+		// error to react to.
+		if reason := unparsedNote(unparsedScopeReasons(repoRoot, scope, backends)); reason != "" {
+			return nil, &StructuralAnalysisSkippedError{Name: symbol.Name, Path: scope.Path, Reason: reason}
+		}
 		if scope.Path != "" {
 			return nil, fmt.Errorf("symbol %q not found in %q", symbol.Name, scope.Path)
 		}
@@ -203,6 +240,42 @@ func resolveSymbol(ctx context.Context, repoRoot string, symbol SymbolRef) (*res
 		return left.Path < right.Path
 	})
 	return &matches[0], nil
+}
+
+// unparsedScopeReporter is implemented by backends that can name the files in
+// a scope no parser ran over. Only the tree-sitter backends implement it,
+// because only their parser declines a file outright; the Go and esbuild
+// parsers either analyze a file or fail the whole lookup.
+type unparsedScopeReporter interface {
+	unparsedInScope(repoRoot string, scope lookupScope) map[string]string
+}
+
+// unparsedScopeReasons collects the unparsed files in scope, keyed by path.
+// A file scope resolves through the parse cache, which the failed lookup has
+// already populated. A directory or repository scope asks the backends, whose
+// call graph for that scope is likewise already cached — re-reading every file
+// in the scope to answer an error message would not be worth it.
+func unparsedScopeReasons(repoRoot string, scope lookupScope, backends []languageBackend) map[string]string {
+	if scope.IsFile {
+		if reason := unparsedFileReason(repoRoot, scope.Path); reason != "" {
+			return map[string]string{scope.Path: reason}
+		}
+		return nil
+	}
+	var out map[string]string
+	for _, backend := range backends {
+		reporter, ok := backend.(unparsedScopeReporter)
+		if !ok {
+			continue
+		}
+		for path, reason := range reporter.unparsedInScope(repoRoot, scope) {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[path] = reason
+		}
+	}
+	return out
 }
 
 type goBackend struct{}
