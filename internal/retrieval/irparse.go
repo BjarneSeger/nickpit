@@ -191,14 +191,6 @@ func unparsedNote(reasons map[string]string) string {
 		len(reasons), strings.Join(groups, "; "), suffix)
 }
 
-// parenthesized wraps a non-empty note for appending to an error message.
-func parenthesized(note string) string {
-	if note == "" {
-		return ""
-	}
-	return " (" + note + ")"
-}
-
 // sortSymbolInfos orders symbol results by path, then start line.
 func sortSymbolInfos(out []*SymbolInfo) {
 	sort.Slice(out, func(i, j int) bool {

@@ -213,10 +213,16 @@ func (g *staticGraph) find(name, path string, depth int, reverse bool) (*CallHie
 	}
 	_, ok := g.nodes[key]
 	if !ok {
-		if path != "" {
-			return nil, fmt.Errorf("symbol %q not found in %q%s", name, path, parenthesized(g.unparsedNote(path)))
+		// Same rule as in resolveSymbol: unparsed files in the graph's scope
+		// make this a skipped analysis, not an absent symbol, and the typed
+		// error routes it to the literal-search fallback.
+		if reason := g.unparsedNote(path); reason != "" {
+			return nil, &StructuralAnalysisSkippedError{Name: name, Path: path, Reason: reason}
 		}
-		return nil, fmt.Errorf("symbol %q not found%s", name, parenthesized(g.unparsedNote("")))
+		if path != "" {
+			return nil, fmt.Errorf("symbol %q not found in %q", name, path)
+		}
+		return nil, fmt.Errorf("symbol %q not found", name)
 	}
 	if g.lowConfidence[key] {
 		return nil, &LowConfidenceError{language: g.language}

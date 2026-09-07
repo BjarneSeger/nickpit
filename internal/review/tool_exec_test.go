@@ -220,6 +220,94 @@ func TestExecuteFindReferencesFallsBackForAbsentGoSymbolInFile(t *testing.T) {
 	}
 }
 
+// A file left unparsed for a budget reason must answer with literal matches in
+// the same turn: telling the model to search itself costs a round trip, and a
+// deliberate skip reported as retrieval_failed reads like an outage worth
+// retrying.
+func TestExecuteFindCallersFallsBackForUnparsedFile(t *testing.T) {
+	repoRoot := t.TempDir()
+	var big strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&big, "def handler_%d(payload):\n    return {\"a\": payload[\"u\"]}\n\n", i)
+	}
+	writeRepoFile(t, repoRoot, "bot.py", big.String())
+	writeRepoFile(t, repoRoot, "use.py", "from bot import handler_7\n\ndef go():\n    return handler_7({})\n")
+	t.Setenv("NICKPIT_MAX_STRUCTURAL_PARSE_BYTES", "64")
+
+	engine := NewEngine(stubSource{}, &capturingLLM{}, retrieval.NewLocalEngine(), config.Profile{Model: "test"})
+	results := engine.executeToolCalls(context.Background(), repoRoot, []llm.ToolCall{{
+		ID: "callers-unparsed", Name: "find_callers", Arguments: `{"symbol":"handler_7","path":"bot.py"}`,
+	}}, freshToolRoundState())
+	payload := decodeToolPayload(t, results[0].Content)
+
+	if payload["fallback"] != "search" {
+		t.Fatalf("unparsed file did not fall back to search: %#v", payload)
+	}
+	if payload["error"] != nil {
+		t.Fatalf("a budget skip must not surface as an error: %#v", payload)
+	}
+	note, _ := payload["note"].(string)
+	if !strings.Contains(note, "bot.py") || !strings.Contains(note, "unparsed") {
+		t.Fatalf("note %q does not explain which file was skipped", note)
+	}
+	if strings.Contains(note, "unavailable for this file type") {
+		t.Fatalf("note %q blames the language for a size skip", note)
+	}
+	if intFromJSON(payload["result_count"]) == 0 {
+		t.Fatalf("fallback search found no literal matches: %#v", payload)
+	}
+}
+
+// The reference path keeps working on an unparsed file — its declaration
+// patterns run over the raw text, so only the structural bindings are missing.
+// It reaches the fallback just for a symbol nothing declares, and then the note
+// must disclose that a file in scope was never parsed instead of presenting the
+// emptiness as proof the symbol does not exist.
+func TestExecuteFindReferencesDisclosesUnparsedFileWhenNothingIsFound(t *testing.T) {
+	repoRoot := t.TempDir()
+	var big strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&big, "def handler_%d(payload):\n    return {\"a\": payload[\"u\"]}\n\n", i)
+	}
+	writeRepoFile(t, repoRoot, "bot.py", big.String())
+	writeRepoFile(t, repoRoot, "use.py", "def go():\n    return 1\n")
+	t.Setenv("NICKPIT_MAX_STRUCTURAL_PARSE_BYTES", "64")
+
+	engine := NewEngine(stubSource{}, &capturingLLM{}, retrieval.NewLocalEngine(), config.Profile{Model: "test"})
+	results := engine.executeToolCalls(context.Background(), repoRoot, []llm.ToolCall{{
+		ID: "refs-unparsed", Name: "find_references", Arguments: `{"symbol":"never_declared","path":""}`,
+	}}, freshToolRoundState())
+	payload := decodeToolPayload(t, results[0].Content)
+
+	if payload["fallback"] != "search" {
+		t.Fatalf("absent symbol did not fall back to search: %#v", payload)
+	}
+	note, _ := payload["note"].(string)
+	if !strings.Contains(note, "unparsed") || !strings.Contains(note, "bot.py") {
+		t.Fatalf("note %q does not disclose the unparsed file", note)
+	}
+}
+
+// A repository with nothing unparsed must keep the plain not-found wording: the
+// disclosure is only honest when a file really was skipped.
+func TestExecuteFindReferencesKeepsPlainNoteWhenEverythingParsed(t *testing.T) {
+	repoRoot := t.TempDir()
+	writeRepoFile(t, repoRoot, "bot.py", "def handler(payload):\n    return payload\n")
+
+	engine := NewEngine(stubSource{}, &capturingLLM{}, retrieval.NewLocalEngine(), config.Profile{Model: "test"})
+	results := engine.executeToolCalls(context.Background(), repoRoot, []llm.ToolCall{{
+		ID: "refs-parsed", Name: "find_references", Arguments: `{"symbol":"never_declared","path":""}`,
+	}}, freshToolRoundState())
+	payload := decodeToolPayload(t, results[0].Content)
+	note, _ := payload["note"].(string)
+	if strings.Contains(note, "unparsed") {
+		t.Fatalf("note %q claims a skip in a fully parsed repository", note)
+	}
+	if !strings.Contains(note, "no declaration") {
+		t.Fatalf("note %q lost the not-found wording", note)
+	}
+}
+
 // TestExecuteSearchReplacesFunctionMatchesForSupportedLanguage guards the
 // post-search optimization for languages with a structural backend.
 func TestExecuteSearchReplacesFunctionMatchesForSupportedLanguage(t *testing.T) {

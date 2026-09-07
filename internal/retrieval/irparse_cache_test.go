@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -218,11 +219,21 @@ func TestFindCallersOnSizeSkippedFileExplainsTheSkip(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a lookup failure for an unparsed file")
 	}
-	if !strings.Contains(err.Error(), "unparsed") {
-		t.Fatalf("error %q does not disclose that the file was left unparsed", err)
+	// The type is what routes the tool layer to the literal-search fallback; a
+	// plain not-found would reach the model as a retrieval failure instead.
+	var skipped *StructuralAnalysisSkippedError
+	if !errors.As(err, &skipped) {
+		t.Fatalf("error %q is not a StructuralAnalysisSkippedError", err)
 	}
-	if !strings.Contains(err.Error(), "literal search") {
-		t.Fatalf("error %q does not point at the fallback", err)
+	var notFound *SymbolNotFoundError
+	if errors.As(err, &notFound) {
+		t.Fatalf("a skipped parse must not claim the symbol is absent: %v", err)
+	}
+	if !strings.Contains(skipped.Reason, "unparsed") {
+		t.Fatalf("reason %q does not disclose that the file was left unparsed", skipped.Reason)
+	}
+	if !strings.Contains(skipped.Reason, "literal search") {
+		t.Fatalf("reason %q does not point at the fallback", skipped.Reason)
 	}
 }
 
@@ -245,11 +256,15 @@ func TestFindCallersOnDirectoryScopeExplainsUnparsedFiles(t *testing.T) {
 		if err == nil {
 			t.Fatalf("scope %q: expected a lookup failure", scope)
 		}
-		if !strings.Contains(err.Error(), "unparsed") || !strings.Contains(err.Error(), "pkg/bot.py") {
-			t.Fatalf("scope %q: error %q does not name the unparsed file", scope, err)
+		var skipped *StructuralAnalysisSkippedError
+		if !errors.As(err, &skipped) {
+			t.Fatalf("scope %q: error %q is not a StructuralAnalysisSkippedError", scope, err)
 		}
-		if !strings.Contains(err.Error(), "literal search") {
-			t.Fatalf("scope %q: error %q does not point at the fallback", scope, err)
+		if !strings.Contains(skipped.Reason, "pkg/bot.py") {
+			t.Fatalf("scope %q: reason %q does not name the unparsed file", scope, skipped.Reason)
+		}
+		if !strings.Contains(skipped.Reason, "literal search") {
+			t.Fatalf("scope %q: reason %q does not point at the fallback", scope, skipped.Reason)
 		}
 	}
 }
