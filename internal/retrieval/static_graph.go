@@ -31,6 +31,10 @@ type staticGraph struct {
 	byPathName    map[string][]string
 	byName        map[string][]string
 	lowConfidence map[string]bool
+	// unparsed lists the repo-relative paths in this graph's scope that no
+	// parser ran over, so a symbol missing from the graph is not reported as
+	// evidence of absence. See tsparser.FileIR.Unparsed.
+	unparsed map[string]string
 }
 
 func newStaticGraph(language, repoRoot string) *staticGraph {
@@ -43,7 +47,39 @@ func newStaticGraph(language, repoRoot string) *staticGraph {
 		byPathName:    map[string][]string{},
 		byName:        map[string][]string{},
 		lowConfidence: map[string]bool{},
+		unparsed:      map[string]string{},
 	}
+}
+
+// markUnparsed records that path contributed no definitions because it was
+// never parsed.
+func (g *staticGraph) markUnparsed(path, reason string) {
+	g.unparsed[path] = reason
+}
+
+// unparsedNote describes the unparsed files a failed lookup in path should
+// mention: the file itself when it is one of them, otherwise the scope's count.
+// It returns "" when everything in scope was parsed.
+func (g *staticGraph) unparsedNote(path string) string {
+	if len(g.unparsed) == 0 {
+		return ""
+	}
+	if reason, ok := g.unparsed[path]; ok && path != "" {
+		return fmt.Sprintf(": %s was left unparsed (%s), so its definitions are missing from this analysis — use a literal search instead", path, reason)
+	}
+	paths := make([]string, 0, len(g.unparsed))
+	for unparsedPath := range g.unparsed {
+		paths = append(paths, unparsedPath)
+	}
+	sort.Strings(paths)
+	listed := paths
+	suffix := ""
+	if len(listed) > maxListedUnparsedFiles {
+		listed = listed[:maxListedUnparsedFiles]
+		suffix = fmt.Sprintf(" and %d more", len(paths)-maxListedUnparsedFiles)
+	}
+	return fmt.Sprintf(": %d file(s) in scope were left unparsed (%s%s), so a definition there is missing from this analysis — use a literal search instead",
+		len(paths), strings.Join(listed, ", "), suffix)
 }
 
 type staticGraphCacheEntry struct {
@@ -174,9 +210,9 @@ func (g *staticGraph) find(name, path string, depth int, reverse bool) (*CallHie
 	_, ok := g.nodes[key]
 	if !ok {
 		if path != "" {
-			return nil, fmt.Errorf("symbol %q not found in %q", name, path)
+			return nil, fmt.Errorf("symbol %q not found in %q%s", name, path, g.unparsedNote(path))
 		}
-		return nil, fmt.Errorf("symbol %q not found", name)
+		return nil, fmt.Errorf("symbol %q not found%s", name, g.unparsedNote(""))
 	}
 	if g.lowConfidence[key] {
 		return nil, &LowConfidenceError{language: g.language}

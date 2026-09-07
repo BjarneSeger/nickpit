@@ -1,6 +1,7 @@
 package tsparser
 
 import (
+	"errors"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -54,6 +55,24 @@ func ParseFile(path string, src []byte) (*FileIR, error) {
 		return parseRust(path, src)
 	default:
 		return parseJS(lang, path, src)
+	}
+}
+
+// markUnparsed records that no parse ran over the file. HasError is set either
+// way so every existing consumer keeps degrading a file it has no structural
+// information for to low confidence; Unparsed distinguishes "we declined to
+// parse this" from "the parser found syntax errors", which is what callers
+// need to avoid reporting missing symbols as absent ones.
+func markUnparsed(ir *FileIR, err error) {
+	ir.HasError = true
+	ir.Unparsed = true
+	switch {
+	case errors.Is(err, ErrSourceTooLarge):
+		ir.UnparsedReason = err.Error()
+	case err != nil:
+		ir.UnparsedReason = "parser runtime failed: " + err.Error()
+	default:
+		ir.UnparsedReason = "parser returned no tree"
 	}
 }
 

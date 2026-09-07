@@ -367,6 +367,12 @@ type parsedReferenceFile struct {
 	// spec — including the ones that resolve to nothing — is recorded once per
 	// parsed snapshot rather than re-stat'd per binding.
 	resolvedImports map[string]string
+	// unparsedReason is set when no parser ran over the file (currently: it
+	// exceeds the tree-sitter parse cap), so a lookup that finds nothing here
+	// can say why instead of reporting the symbol as absent. The masked-source
+	// patterns still run, so such a file is not invisible — only its structural
+	// bindings are missing.
+	unparsedReason string
 }
 
 type parsedFunction struct {
@@ -395,7 +401,14 @@ var parsedReferenceCache referenceCacheStore[parsedReferenceCacheEntry] // absol
 // the process. Least-recently-used roots are dropped once the cap is exceeded;
 // an evicted entry stays alive for whoever still holds it and is simply rebuilt
 // on the next lookup, so eviction can never produce a wrong answer.
+// The zero value caps entries with NICKPIT_REFERENCE_CACHE_MAX_ENTRIES /
+// toollimits.DefaultReferenceCacheEntries; a store keyed by something other
+// than a repository root sets capEnv and capFallback to its own knob so the
+// per-repository cap cannot bound an unrelated cache.
 type referenceCacheStore[T any] struct {
+	capEnv      string
+	capFallback int
+
 	mu      sync.Mutex
 	entries map[string]*referenceCacheSlot[T]
 	clock   uint64
@@ -430,7 +443,11 @@ func (c *referenceCacheStore[T]) entry(key string) *T {
 // to that many. NICKPIT_REFERENCE_CACHE_MAX_ENTRIES tunes it; a value <= 0
 // disables eviction.
 func (c *referenceCacheStore[T]) evictLocked() {
-	limit := cacheCapFromEnv("NICKPIT_REFERENCE_CACHE_MAX_ENTRIES", toollimits.DefaultReferenceCacheEntries)
+	capEnv, capFallback := c.capEnv, c.capFallback
+	if capEnv == "" {
+		capEnv, capFallback = "NICKPIT_REFERENCE_CACHE_MAX_ENTRIES", toollimits.DefaultReferenceCacheEntries
+	}
+	limit := cacheCapFromEnv(capEnv, capFallback)
 	if limit <= 0 {
 		return
 	}
@@ -455,11 +472,15 @@ func resolveParsedDefinition(symbol SymbolRef, scope lookupScope, parsed []*pars
 	// The declaration patterns depend only on the language and the symbol, so
 	// they are compiled once per language rather than once per file.
 	patterns := map[string]declarationPatterns{}
+	var unparsed []string
 	for _, file := range parsed {
 		if !pathInLookupScope(file.path, scope) {
 			continue
 		}
 		analyzed++
+		if file.unparsedReason != "" {
+			unparsed = append(unparsed, file.path)
+		}
 		compiled, ok := patterns[file.language]
 		if !ok {
 			compiled = compileDeclarationPatterns(file.language, symbol.Name)
@@ -473,7 +494,10 @@ func resolveParsedDefinition(symbol SymbolRef, scope lookupScope, parsed []*pars
 			// backend, so its absence says nothing about the symbol.
 			return definitionCandidate{}, &UnsupportedLanguageError{Path: scope.Path}
 		}
-		return definitionCandidate{}, &SymbolNotFoundError{Name: symbol.Name, Path: scope.Path}
+		// A file nobody parsed cannot support a claim of absence, so the reason
+		// travels with the error and reaches the model as part of the
+		// literal-search note.
+		return definitionCandidate{}, &SymbolNotFoundError{Name: symbol.Name, Path: scope.Path, Reason: unparsedScopeReason(unparsed)}
 	}
 	candidates = dedupeDefinitionCandidates(candidates)
 	// An import binds a name declared somewhere else, so it is a usage kind,
@@ -667,7 +691,8 @@ func parseReferenceFile(repoRoot, path, source string) *parsedReferenceFile {
 		path: path, language: language,
 		masked: maskReferenceSource(lines, language),
 	}
-	if ir, err := tsparser.ParseFile(path, []byte(source)); err == nil {
+	if ir, err := parseFileIR(path, []byte(source)); err == nil {
+		file.unparsedReason = ir.UnparsedReason
 		file.imports = append(file.imports, ir.Imports...)
 		file.exports = append(file.exports, ir.Exports...)
 		for _, symbol := range ir.Symbols {
@@ -689,6 +714,29 @@ func parseReferenceFile(repoRoot, path, source string) *parsedReferenceFile {
 	}
 	return file
 }
+
+// unparsedScopeReason describes the files a lookup could not analyze
+// structurally, for SymbolNotFoundError.Reason. It returns "" when every file
+// in the scope was parsed, which keeps the error message unchanged for the
+// common case.
+func unparsedScopeReason(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	sort.Strings(paths)
+	listed := paths
+	suffix := ""
+	if len(listed) > maxListedUnparsedFiles {
+		listed = listed[:maxListedUnparsedFiles]
+		suffix = fmt.Sprintf(" and %d more", len(paths)-maxListedUnparsedFiles)
+	}
+	return fmt.Sprintf("%d file(s) in scope were left unparsed because they exceed the structural parse size cap (%s%s), so a declaration there would be invisible to this analysis",
+		len(paths), strings.Join(listed, ", "), suffix)
+}
+
+// maxListedUnparsedFiles bounds how many paths the reason names, so a
+// repository of large files cannot turn one tool result into a file listing.
+const maxListedUnparsedFiles = 5
 
 func pathInLookupScope(path string, scope lookupScope) bool {
 	if scope.Path == "" {

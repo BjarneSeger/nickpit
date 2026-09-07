@@ -186,7 +186,18 @@ func resolveSymbol(ctx context.Context, repoRoot string, symbol SymbolRef) (*res
 
 	if len(matches) == 0 {
 		if scope.Path != "" {
-			return nil, fmt.Errorf("symbol %q not found in %q", symbol.Name, scope.Path)
+			// A file the retrieval layer declined to parse holds no symbols for
+			// a budget reason, which is not evidence the symbol is absent. Only
+			// a file scope is checked: naming the file costs one cached lookup,
+			// while a directory scope would have to re-read every file in it —
+			// there the note comes from the call graph instead.
+			note := ""
+			if scope.IsFile {
+				if reason := unparsedFileReason(repoRoot, scope.Path); reason != "" {
+					note = fmt.Sprintf(" (%s was left unparsed: %s — use a literal search instead)", scope.Path, reason)
+				}
+			}
+			return nil, fmt.Errorf("symbol %q not found in %q%s", symbol.Name, scope.Path, note)
 		}
 		return nil, fmt.Errorf("symbol %q not found", symbol.Name)
 	}

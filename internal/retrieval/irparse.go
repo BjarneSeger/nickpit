@@ -1,6 +1,7 @@
 package retrieval
 
 import (
+	"crypto/sha256"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -9,7 +10,42 @@ import (
 
 	"github.com/dgrieser/nickpit/internal/retrieval/repofs"
 	"github.com/dgrieser/nickpit/internal/retrieval/tsparser"
+	"github.com/dgrieser/nickpit/internal/toollimits"
 )
+
+// fileIRCacheEntry memoizes one file's parse. The sync.Once is the
+// single-flight: the reviewer lanes run concurrently and repeatedly ask for the
+// same files (a repo-wide graph, a directory-scoped graph and a reference
+// lookup all cover the same sources), and one tree-sitter parse of a large file
+// costs hundreds of MB, so a second concurrent parse of the same bytes is the
+// difference between a review and an OOM kill.
+type fileIRCacheEntry struct {
+	once sync.Once
+	ir   *tsparser.FileIR
+	err  error
+}
+
+// fileIRCache is keyed by path plus content hash, so a rewritten file parses
+// again while an unchanged one never does — including across the graph and
+// reference caches, which key by repository root and scope and therefore each
+// used to pay their own parse of every file.
+var fileIRCache = referenceCacheStore[fileIRCacheEntry]{
+	capEnv:      "NICKPIT_IR_CACHE_MAX_ENTRIES",
+	capFallback: toollimits.DefaultFileIRCacheEntries,
+}
+
+// parseFileIR returns the IR for src, parsing it at most once per (path,
+// content) in this process and never twice at the same time. Eviction can drop
+// an entry a caller still holds; that only costs a later re-parse and can never
+// produce a different answer, because the key pins the exact bytes.
+func parseFileIR(path string, src []byte) (*tsparser.FileIR, error) {
+	sum := sha256.Sum256(src)
+	entry := fileIRCache.entry(path + "\x00" + string(sum[:]))
+	entry.once.Do(func() {
+		entry.ir, entry.err = tsparser.ParseFile(path, src)
+	})
+	return entry.ir, entry.err
+}
 
 // parseIRFiles parses files (absolute paths under repoRoot) with tsparser in
 // parallel and returns the IR keyed by repo-relative slash path.
@@ -37,7 +73,7 @@ func parseIRFiles(repoRoot string, files []string) (map[string]*tsparser.FileIR,
 					results <- result{err: err}
 					continue
 				}
-				ir, err := tsparser.ParseFile(rel, data)
+				ir, err := parseFileIR(rel, data)
 				results <- result{rel: rel, ir: ir, err: err}
 			}
 		})
@@ -66,6 +102,26 @@ func parseIRFiles(repoRoot string, files []string) (map[string]*tsparser.FileIR,
 		return nil, firstErr
 	}
 	return out, nil
+}
+
+// unparsedFileReason reports why path has no structural symbols when the cause
+// is a parse the retrieval layer declined (currently: the file exceeds the
+// tree-sitter parse cap), and "" for every other case — including a file that
+// parsed fine, an unreadable file and a language with no tsparser backend. The
+// parse is served from fileIRCache, so this costs a file read and a hash.
+func unparsedFileReason(repoRoot, path string) string {
+	if path == "" {
+		return ""
+	}
+	data, err := repofs.ReadFile(repoRoot, filepath.Join(repoRoot, filepath.FromSlash(path)))
+	if err != nil {
+		return ""
+	}
+	ir, err := parseFileIR(path, data)
+	if err != nil || ir == nil {
+		return ""
+	}
+	return ir.UnparsedReason
 }
 
 // sortSymbolInfos orders symbol results by path, then start line.

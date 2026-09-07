@@ -45,6 +45,10 @@ type pythonFile struct {
 	// byName lists symbol ids per name in declaration order, including nested
 	// definitions (used as a same-file fallback for bare-call resolution).
 	byName map[string][]string
+	// unparsedReason is set when no parser ran over the file, so the graph can
+	// tell a lookup that the file's definitions are missing for a budget
+	// reason rather than absent. See tsparser.FileIR.Unparsed.
+	unparsedReason string
 }
 
 var pythonSupportedExts = map[string]struct{}{".py": {}}
@@ -105,6 +109,11 @@ func buildPythonGraph(repoRoot string, scope lookupScope) (*staticGraph, error) 
 		return nil, err
 	}
 	graph := newStaticGraph("python", repoRoot)
+	for rel, module := range modules {
+		if module.unparsedReason != "" {
+			graph.markUnparsed(rel, module.unparsedReason)
+		}
+	}
 	for _, module := range modules {
 		for _, symbol := range module.symbols {
 			graph.addNode(symbol.id, staticNode{
@@ -160,12 +169,13 @@ func parsePythonFiles(repoRoot string, files []string) (map[string]*pythonFile, 
 	modules := make(map[string]*pythonFile, len(irs))
 	for rel, ir := range irs {
 		module := &pythonFile{
-			path:        rel,
-			imports:     map[string]pythonImportBinding{},
-			topLevel:    map[string]string{},
-			classMethod: map[string]map[string]string{},
-			symbols:     map[string]*pythonSymbol{},
-			byName:      map[string][]string{},
+			path:           rel,
+			imports:        map[string]pythonImportBinding{},
+			topLevel:       map[string]string{},
+			classMethod:    map[string]map[string]string{},
+			symbols:        map[string]*pythonSymbol{},
+			byName:         map[string][]string{},
+			unparsedReason: ir.UnparsedReason,
 		}
 		for _, irSymbol := range ir.Symbols {
 			symbol := &pythonSymbol{
