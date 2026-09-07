@@ -121,7 +121,8 @@ func TestFileIRCacheKeepsInFlightEntriesUnderCapPressure(t *testing.T) {
 }
 
 // The store must not spin when every entry is still being built: it holds more
-// than the cap for that moment instead.
+// than the cap for that moment instead. That overshoot has to be temporary —
+// see TestFileIRCacheCompactsAfterInFlightParsesComplete.
 func TestFileIRCacheHoldsMoreThanCapWhileEverythingIsInFlight(t *testing.T) {
 	t.Setenv("NICKPIT_IR_CACHE_MAX_ENTRIES", "2")
 	cache := referenceCacheStore[fileIRCacheEntry]{
@@ -133,6 +134,53 @@ func TestFileIRCacheHoldsMoreThanCapWhileEverythingIsInFlight(t *testing.T) {
 	}
 	if len(cache.entries) != 5 {
 		t.Fatalf("cache holds %d entries, want all 5 in-flight entries retained", len(cache.entries))
+	}
+}
+
+// Insertion cannot evict a retained entry, so a burst of concurrent first-time
+// parses ends over the cap. Nothing else would bring it back down: a run whose
+// remaining lookups all hit the cache would hold every one of those entries —
+// and the source text in them — for the life of the process.
+func TestFileIRCacheCompactsAfterInFlightParsesComplete(t *testing.T) {
+	t.Setenv("NICKPIT_IR_CACHE_MAX_ENTRIES", "2")
+	cache := referenceCacheStore[fileIRCacheEntry]{
+		capEnv:      "NICKPIT_IR_CACHE_MAX_ENTRIES",
+		capFallback: 2,
+	}
+	entries := make([]*fileIRCacheEntry, 0, 5)
+	for i := range 5 {
+		entries = append(entries, cache.entry(fmt.Sprintf("f%d.py", i)))
+	}
+	for _, entry := range entries {
+		entry.parsed.Store(true)
+		cache.compact()
+	}
+	if len(cache.entries) != 2 {
+		t.Fatalf("cache holds %d entries after every parse finished, want 2", len(cache.entries))
+	}
+}
+
+// The same through the real call path: five concurrent parses under a cap of
+// two must not leave the process-wide cache over that cap.
+func TestParseFileIRKeepsTheCacheAtItsCapAfterConcurrentParses(t *testing.T) {
+	t.Setenv("NICKPIT_IR_CACHE_MAX_ENTRIES", "2")
+
+	var wg sync.WaitGroup
+	for i := range 5 {
+		wg.Go(func() {
+			src := fmt.Appendf(nil, "def handler_%d(payload):\n    return payload\n", i)
+			if _, err := parseFileIR(fmt.Sprintf("burst%d.py", i), src); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+
+	fileIRCache.mu.Lock()
+	held := len(fileIRCache.entries)
+	fileIRCache.mu.Unlock()
+	if held > 2 {
+		t.Fatalf("cache holds %d entries after the burst, want at most 2", held)
 	}
 }
 

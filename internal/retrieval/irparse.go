@@ -52,14 +52,24 @@ var fileIRCache = referenceCacheStore[fileIRCacheEntry]{
 func parseFileIR(path string, src []byte) (*tsparser.FileIR, error) {
 	sum := sha256.Sum256(src)
 	entry := fileIRCache.entry(path + "\x00" + string(sum[:]))
+	parsedHere := false
 	entry.once.Do(func() {
 		// Deferred so a panicking parse still releases the entry: sync.Once
 		// considers Do done either way, so a permanently retained entry would
 		// answer every later caller with the same empty result and never leave
 		// the cache.
 		defer entry.parsed.Store(true)
+		parsedHere = true
 		entry.ir, entry.err = tsparser.ParseFile(path, src)
 	})
+	if parsedHere {
+		// Insertion could not evict anything while this parse was in flight, so
+		// the cap is enforced again now that it is not. Only the caller that
+		// did the parse compacts: the others have changed nothing about what is
+		// evictable, and a compaction per cache hit would take the lock on
+		// every lookup for nothing.
+		fileIRCache.compact()
+	}
 	return entry.ir, entry.err
 }
 

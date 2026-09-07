@@ -484,6 +484,18 @@ func (c *referenceCacheStore[T]) evictLocked() {
 	}
 }
 
+// compact re-runs eviction against the current retainability of every entry.
+// entry() can only drop what is evictable at insertion time, so a burst of
+// concurrent first-time builds — each one retained while it runs — leaves the
+// cache over its cap once they finish. Whoever finishes a build calls this;
+// without it the cache stays over cap until the next miss, and a run whose
+// remaining lookups all hit would never come back under it.
+func (c *referenceCacheStore[T]) compact() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictLocked()
+}
+
 // resolveParsedDefinition picks the single declaration of symbol inside scope.
 // It is separate from occurrence collection so a repo-wide lookup that lands on
 // a Go declaration can hand off to go/types without paying for a parsed-language
