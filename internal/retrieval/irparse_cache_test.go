@@ -57,9 +57,7 @@ func TestParseFileIRSingleFlightsConcurrentCallers(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			ir, err := parseFileIR("concurrent.py", src)
 			if err != nil {
@@ -67,7 +65,7 @@ func TestParseFileIRSingleFlightsConcurrentCallers(t *testing.T) {
 				return
 			}
 			results[i] = ir
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
